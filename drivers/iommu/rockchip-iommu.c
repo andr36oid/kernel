@@ -1571,6 +1571,11 @@ static int rk_iommu_probe(struct platform_device *pdev)
 					"rockchip,skip-mmu-read");
 	iommu->dlr_disable = device_property_read_bool(dev,
 					"rockchip,disable-device-link-resume");
+	if (of_property_match_string(dev->of_node, "interrupt-names",
+				      "vopb_mmu") >= 0 ||
+	    of_property_match_string(dev->of_node, "interrupt-names",
+				      "vopl_mmu") >= 0)
+		iommu->dlr_disable = true;
 	iommu->shootdown_entire = device_property_read_bool(dev,
 					"rockchip,shootdown-entire");
 	iommu->master_handle_irq = device_property_read_bool(dev,
