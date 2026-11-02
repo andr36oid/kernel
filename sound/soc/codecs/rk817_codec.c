@@ -1444,6 +1444,12 @@ static void rk817_remove(struct snd_soc_component *component)
 
 }
 
+static const struct snd_soc_dapm_widget rk817_dapm_widgets[] = {
+	SND_SOC_DAPM_INPUT("MIC_IN"),
+	SND_SOC_DAPM_OUTPUT("HPOL"),
+	SND_SOC_DAPM_OUTPUT("HPOR"),
+};
+
 static const struct snd_soc_component_driver soc_codec_dev_rk817 = {
 	.probe = rk817_probe,
 	.remove = rk817_remove,
@@ -1452,7 +1458,9 @@ static const struct snd_soc_component_driver soc_codec_dev_rk817 = {
 	.idle_bias_on = 1,
 	.use_pmdown_time = 1,
 	.endianness = 1,
-	.non_legacy_dai_naming = 1
+	.non_legacy_dai_naming = 1,
+	.dapm_widgets = rk817_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(rk817_dapm_widgets),
 };
 
 static int rk817_codec_parse_dt_property(struct device *dev,

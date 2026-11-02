@@ -23,6 +23,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/power/rk_usbbc.h>
+#include <linux/reboot.h>
 #include <linux/regmap.h>
 #include <linux/rk_keys.h>
 #include <linux/rtc.h>
@@ -1856,6 +1857,26 @@ static enum power_supply_property rk817_bat_props[] = {
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
 };
 
+static int rg351p_battery_pre_voltage = 5000;
+#define RG351_BAT_MAX_VOLTAGE 3900
+#define RG351_BAT_MIN_VOLTAGE 3300
+static int rk817_battery_rg351p_capacity_get(int voltage, int charge_status)
+{
+	if (rg351p_battery_pre_voltage >= 5000)
+		rg351p_battery_pre_voltage = RG351_BAT_MAX_VOLTAGE;
+
+	if (voltage < 3900 && voltage > 3300 &&
+	    (voltage < rg351p_battery_pre_voltage || charge_status))
+		rg351p_battery_pre_voltage = voltage;
+	else if (voltage >= 3900)
+		rg351p_battery_pre_voltage = RG351_BAT_MAX_VOLTAGE;
+	else if (voltage <= 3300)
+		rg351p_battery_pre_voltage = RG351_BAT_MIN_VOLTAGE;
+
+	return (rg351p_battery_pre_voltage - RG351_BAT_MIN_VOLTAGE) /
+	       ((RG351_BAT_MAX_VOLTAGE - RG351_BAT_MIN_VOLTAGE) / 100);
+}
+
 static int rk817_get_capacity_leve(struct rk817_battery_device *battery)
 {
 	int dsoc;
@@ -1863,7 +1884,8 @@ static int rk817_get_capacity_leve(struct rk817_battery_device *battery)
 	if (battery->pdata->bat_mode == MODE_VIRTUAL)
 		return POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
 
-	dsoc = (battery->dsoc + 500) / 1000;
+	dsoc = rk817_battery_rg351p_capacity_get(battery->voltage_avg,
+						 power_supply_is_system_supplied());
 	if (dsoc < 1)
 		return POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
 	else if (dsoc <= 20)
@@ -1913,9 +1935,8 @@ static int rk817_battery_get_property(struct power_supply *psy,
 			val->intval = VIRTUAL_VOLTAGE * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = (battery->dsoc + 400) / 1000;
-		if (battery->pdata->bat_mode == MODE_VIRTUAL)
-			val->intval = VIRTUAL_SOC;
+		val->intval = rk817_battery_rg351p_capacity_get(battery->voltage_avg,
+								 power_supply_is_system_supplied());
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
 		val->intval = rk817_get_capacity_leve(battery);
@@ -2157,6 +2178,9 @@ static void rk817_bat_lowpwr_check(struct rk817_battery_device *battery)
 				battery->dsoc -= 1000;
 			DBG("low power, soc=%d, current=%d\n",
 			    battery->dsoc, battery->current_avg);
+			pr_info("battery voltage is under %dmV, voltage_avg=%dmV, power off!\n",
+				pwr_off_thresd, battery->voltage_avg);
+			orderly_poweroff(false);
 		}
 	} else {
 		time = 0;
