@@ -42,6 +42,13 @@ config JOYSTICK_A3D
 	  To compile this driver as a module, choose M here: the
 	  module will be called a3d.
 
+config JOYSTICK_ODROIDGO3
+	tristate "ODROIDGO3 joypad driver"
+	depends on ARCH_ROCKCHIP && IIO
+	select INPUT_POLLDEV
+	help
+	  Made for ODROIDGO3.
+
 config JOYSTICK_ADC
 	tristate "Simple joystick connected over ADC"
 	depends on IIO
