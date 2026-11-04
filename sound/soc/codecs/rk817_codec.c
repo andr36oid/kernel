@@ -609,11 +609,10 @@ static int rk817_codec_power_down(struct snd_soc_component *component, int type)
 
 /* For tiny alsa playback/capture/voice call path */
 static const char * const rk817_playback_path_mode[] = {
-	"OFF", "RCV", "SPK", "HP", "HP_NO_MIC", "BT", "SPK_HP", /* 0-6 */
-	"RING_SPK", "RING_HP", "RING_HP_NO_MIC", "RING_SPK_HP"}; /* 7-10 */
+	"OFF", "SPK", "HP", "SPK_HP"};
 
 static const char * const rk817_capture_path_mode[] = {
-	"MIC OFF", "Main Mic", "Hands Free Mic", "BT Sco Mic"};
+	"MIC OFF", "Main Mic"};
 
 static const char * const rk817_binary_mode[] = {"OFF", "ON"};
 
@@ -652,17 +651,13 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 
 	switch (rk817->playback_path) {
 	case OFF:
-		if (pre_path != OFF && (pre_path != HP_PATH &&
-			pre_path != HP_NO_MIC && pre_path != RING_HP &&
-			pre_path != RING_HP_NO_MIC)) {
+		if (pre_path != OFF && pre_path != HP_PATH) {
 			rk817_codec_power_down(component, RK817_CODEC_PLAYBACK);
 			if (rk817->capture_path == 0)
 				rk817_codec_power_down(component, RK817_CODEC_ALL);
 		}
 		break;
-	case RCV:
 	case SPK_PATH:
-	case RING_SPK:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
 		if (rk817->out_l2spk_r2hp) {
@@ -721,15 +716,8 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 						      RK817_CODEC_DDAC_MUTE_MIXCTL,
 						      DACMT_ENABLE, DACMT_DISABLE);
 		}
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL,
-					rk817->spk_volume);
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR,
-					rk817->spk_volume);
 		break;
 	case HP_PATH:
-	case HP_NO_MIC:
-	case RING_HP:
-	case RING_HP_NO_MIC:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
 		/* HP_CP_EN , CP 2.3V */
@@ -743,16 +731,8 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 		snd_soc_component_update_bits(component,
 					      RK817_CODEC_DDAC_MUTE_MIXCTL,
 					      DACMT_ENABLE, DACMT_DISABLE);
-
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL,
-					rk817->hp_volume);
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR,
-					rk817->hp_volume);
-		break;
-	case BT:
 		break;
 	case SPK_HP:
-	case RING_SPK_HP:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
 
@@ -780,11 +760,6 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 						RK817_CODEC_ACLASSD_CFG2,
 						0xf7);
 		}
-
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL,
-					rk817->hp_volume);
-		snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR,
-					rk817->hp_volume);
 		break;
 	default:
 		return -EINVAL;
@@ -889,43 +864,6 @@ static int rk817_capture_path_config(struct snd_soc_component *component,
 						      PWD_PGA_R_EN);
 		}
 		break;
-	case HANDS_FREE_MIC:
-		if (pre_path == MIC_OFF)
-			rk817_codec_power_up(component, RK817_CODEC_CAPTURE);
-
-		if (rk817->adc_for_loopback) {
-			/* don't need to gain when adc use for loopback */
-			snd_soc_component_update_bits(component,
-						      RK817_CODEC_AMIC_CFG0,
-						      0xf,
-						      0x0);
-			snd_soc_component_write(component,
-						RK817_CODEC_DMIC_PGA_GAIN,
-						0x66);
-			snd_soc_component_write(component,
-						RK817_CODEC_DADC_VOLL,
-						0x00);
-			snd_soc_component_write(component,
-						RK817_CODEC_DADC_VOLR,
-						0x00);
-			break;
-		}
-		if (!rk817->mic_in_differential) {
-			snd_soc_component_write(component,
-						RK817_CODEC_DADC_VOLL,
-						0xff);
-			snd_soc_component_update_bits(component,
-						      RK817_CODEC_AADC_CFG0,
-						      ADC_L_PWD_MASK,
-						      ADC_L_PWD_EN);
-			snd_soc_component_update_bits(component,
-						      RK817_CODEC_AMIC_CFG0,
-						      PWD_PGA_L_MASK,
-						      PWD_PGA_L_EN);
-		}
-		break;
-	case BT_SCO_MIC:
-		break;
 	default:
 		return -EINVAL;
 	}
@@ -1018,6 +956,85 @@ static int rk817_dac_vol_put(struct snd_kcontrol *kcontrol,
 	return snd_soc_put_volsw(kcontrol, ucontrol);
 }
 
+/*
+ * dArkOSen custom playback volume curve.
+ * Maps UI position 0-237 to DDAC_VOL register 0x12 (loudest,
+ * -6.75dB) .. 0xff (quietest, -95dB) on a power curve, so 50%
+ * is louder than linear without changing min/max dB.
+ */
+static const u8 darkosen_vol_curve_tbl[238] = {
+	0xff, 0xfd, 0xfb, 0xfa, 0xf8, 0xf6, 0xf4, 0xf3, 0xf1, 0xef, 0xed, 0xec,
+	0xea, 0xe8, 0xe6, 0xe5, 0xe3, 0xe1, 0xe0, 0xde, 0xdc, 0xda, 0xd9, 0xd7,
+	0xd5, 0xd4, 0xd2, 0xd1, 0xcf, 0xcd, 0xcc, 0xca, 0xc8, 0xc7, 0xc5, 0xc4,
+	0xc2, 0xc0, 0xbf, 0xbd, 0xbc, 0xba, 0xb9, 0xb7, 0xb6, 0xb4, 0xb3, 0xb1,
+	0xb0, 0xae, 0xad, 0xab, 0xaa, 0xa8, 0xa7, 0xa5, 0xa4, 0xa2, 0xa1, 0x9f,
+	0x9e, 0x9c, 0x9b, 0x9a, 0x98, 0x97, 0x95, 0x94, 0x93, 0x91, 0x90, 0x8f,
+	0x8d, 0x8c, 0x8b, 0x89, 0x88, 0x87, 0x85, 0x84, 0x83, 0x81, 0x80, 0x7f,
+	0x7e, 0x7c, 0x7b, 0x7a, 0x79, 0x77, 0x76, 0x75, 0x74, 0x72, 0x71, 0x70,
+	0x6f, 0x6e, 0x6c, 0x6b, 0x6a, 0x69, 0x68, 0x67, 0x66, 0x64, 0x63, 0x62,
+	0x61, 0x60, 0x5f, 0x5e, 0x5d, 0x5c, 0x5b, 0x59, 0x58, 0x57, 0x56, 0x55,
+	0x54, 0x53, 0x52, 0x51, 0x50, 0x4f, 0x4e, 0x4d, 0x4c, 0x4b, 0x4a, 0x49,
+	0x49, 0x48, 0x47, 0x46, 0x45, 0x44, 0x43, 0x42, 0x41, 0x40, 0x3f, 0x3f,
+	0x3e, 0x3d, 0x3c, 0x3b, 0x3a, 0x3a, 0x39, 0x38, 0x37, 0x36, 0x36, 0x35,
+	0x34, 0x33, 0x33, 0x32, 0x31, 0x30, 0x30, 0x2f, 0x2e, 0x2e, 0x2d, 0x2c,
+	0x2c, 0x2b, 0x2a, 0x2a, 0x29, 0x28, 0x28, 0x27, 0x26, 0x26, 0x25, 0x25,
+	0x24, 0x24, 0x23, 0x22, 0x22, 0x21, 0x21, 0x20, 0x20, 0x1f, 0x1f, 0x1e,
+	0x1e, 0x1d, 0x1d, 0x1c, 0x1c, 0x1c, 0x1b, 0x1b, 0x1a, 0x1a, 0x1a, 0x19,
+	0x19, 0x18, 0x18, 0x18, 0x17, 0x17, 0x17, 0x16, 0x16, 0x16, 0x16, 0x15,
+	0x15, 0x15, 0x14, 0x14, 0x14, 0x14, 0x14, 0x13, 0x13, 0x13, 0x13, 0x13,
+	0x13, 0x13, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
+};
+
+static int darkosen_playback_vol_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	unsigned int reg_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
+	unsigned int reg_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
+	int i;
+
+	ucontrol->value.integer.value[0] = 0;
+	ucontrol->value.integer.value[1] = 0;
+
+	for (i = 0; i < 238; i++) {
+		if (darkosen_vol_curve_tbl[i] <= reg_l) {
+			ucontrol->value.integer.value[0] = i;
+			break;
+		}
+	}
+	for (i = 0; i < 238; i++) {
+		if (darkosen_vol_curve_tbl[i] <= reg_r) {
+			ucontrol->value.integer.value[1] = i;
+			break;
+		}
+	}
+
+	return 0;
+}
+
+static int darkosen_playback_vol_put(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	unsigned int pos_l = ucontrol->value.integer.value[0];
+	unsigned int pos_r = ucontrol->value.integer.value[1];
+	unsigned int old_l, old_r;
+
+	if (pos_l > 237 || pos_r > 237)
+		return -EINVAL;
+
+	old_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
+	old_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
+
+	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL,
+				darkosen_vol_curve_tbl[pos_l]);
+	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR,
+				darkosen_vol_curve_tbl[pos_r]);
+
+	return (darkosen_vol_curve_tbl[pos_l] != old_l ||
+		darkosen_vol_curve_tbl[pos_r] != old_r) ? 1 : 0;
+}
+
 static struct snd_kcontrol_new rk817_snd_controls[] = {
 	SOC_ENUM_EXT("Playback Path", rk817_playback_path_type,
 		     rk817_playback_path_get, rk817_playback_path_put),
@@ -1044,6 +1061,12 @@ static struct snd_kcontrol_new rk817_snd_controls[] = {
 
 	SOC_SINGLE_TLV("HP Output Gain", RK817_CODEC_AHP_CFG0,
 		       3, 3, 0, hp_out_tlv),
+
+	SOC_DOUBLE_EXT("Playback Volume", 0, 0, 1, 237, 0,
+		       darkosen_playback_vol_get, darkosen_playback_vol_put),
+
+	SOC_DOUBLE_R("Record Volume", RK817_CODEC_DADC_VOLL,
+		     RK817_CODEC_DADC_VOLR, 0, 0xff, 1),
 };
 
 static int rk817_set_dai_sysclk(struct snd_soc_dai *codec_dai,
@@ -1212,7 +1235,6 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 
 		switch (rk817->playback_path) {
 		case SPK_PATH:
-		case RING_SPK:
 			if (rk817->out_l2spk_r2hp) {
 				snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 						PWD_DACBIAS_ON | PWD_DACD_ON |
@@ -1230,9 +1252,6 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 			rk817_codec_ctl_gpio(rk817, CODEC_SET_HP, 0);
 			break;
 		case HP_PATH:
-		case HP_NO_MIC:
-		case RING_HP:
-		case RING_HP_NO_MIC:
 			snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 					PWD_DACBIAS_ON | PWD_DACD_DOWN |
 					PWD_DACL_ON | PWD_DACR_ON);
@@ -1240,7 +1259,6 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 			rk817_codec_ctl_gpio(rk817, CODEC_SET_HP, 1);
 			break;
 		case SPK_HP:
-		case RING_SPK_HP:
 			snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 					PWD_DACBIAS_ON | PWD_DACD_ON |
 					PWD_DACL_ON | PWD_DACR_ON);
