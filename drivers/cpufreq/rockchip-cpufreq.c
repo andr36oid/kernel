@@ -55,6 +55,60 @@ struct cluster_info {
 };
 static LIST_HEAD(cluster_info_list);
 
+static unsigned int darkosen_oc_max_cpufreq_khz;
+static unsigned int darkosen_oc_boot_cpufreq_khz = 1296000;
+static bool darkosen_oc_boot_cpufreq_set;
+
+static int __init darkosen_oc_max_cpufreq_setup(char *str)
+{
+	unsigned int mhz;
+
+	if (!str || kstrtouint(str, 10, &mhz))
+		return -EINVAL;
+
+	darkosen_oc_max_cpufreq_khz = mhz * 1000;
+	return 0;
+}
+early_param("max_cpufreq", darkosen_oc_max_cpufreq_setup);
+
+static int __init darkosen_oc_boot_cpufreq_setup(char *str)
+{
+	unsigned int mhz;
+
+	if (!str || kstrtouint(str, 10, &mhz))
+		return -EINVAL;
+
+	darkosen_oc_boot_cpufreq_khz = mhz * 1000;
+	darkosen_oc_boot_cpufreq_set = true;
+	return 0;
+}
+early_param("boot_cpufreq", darkosen_oc_boot_cpufreq_setup);
+
+static void darkosen_oc_apply_cmdline(struct cpufreq_policy *policy)
+{
+	unsigned int dtb_max = policy->cpuinfo.max_freq;
+	unsigned int cap = dtb_max;
+	int ret;
+
+	if (darkosen_oc_max_cpufreq_khz) {
+		if (darkosen_oc_max_cpufreq_khz > dtb_max)
+			pr_warn("darkosen-oc: max_cpufreq=%u exceeds DTB ceiling %u kHz, ignoring\n",
+				darkosen_oc_max_cpufreq_khz, dtb_max);
+		else
+			cap = darkosen_oc_max_cpufreq_khz;
+	}
+
+	if (darkosen_oc_boot_cpufreq_khz && cap > darkosen_oc_boot_cpufreq_khz)
+		cap = darkosen_oc_boot_cpufreq_khz;
+
+	ret = freq_qos_update_request(policy->max_freq_req, cap);
+	if (ret < 0)
+		pr_err("darkosen-oc: failed to set max freq %u kHz: %d\n", cap, ret);
+	else if (darkosen_oc_boot_cpufreq_set || darkosen_oc_max_cpufreq_khz)
+		pr_info("darkosen-oc: policy max set to %u kHz (dtb ceiling %u kHz)\n",
+			cap, dtb_max);
+}
+
 static int px30_get_soc_info(struct device *dev, struct device_node *np,
 			     int *bin, int *process)
 {
@@ -619,6 +673,9 @@ static int rockchip_cpufreq_cluster_init(int cpu, struct cluster_info *cluster)
 	rockchip_init_pvtpll_table(&cluster->opp_info, bin);
 	rockchip_get_scale_volt_sel(dev, "cpu_leakage", reg_name, bin, process,
 				    &cluster->scale, &cluster->volt_sel);
+	/* Output CPU binning info for ES */
+	pr_info("es_info: cpu_bin=%d process=%d scale=%d volt_sel=%d\n",
+		bin, process, cluster->scale, cluster->volt_sel);
 	if (opp_info->data && opp_info->data->set_soc_info)
 		opp_info->data->set_soc_info(dev, np, bin, process, cluster->volt_sel);
 	pname_table = rockchip_set_opp_prop_name(dev, process, cluster->volt_sel);
@@ -820,6 +877,7 @@ static int rockchip_cpufreq_notifier(struct notifier_block *nb,
 			return NOTIFY_BAD;
 		if (rockchip_cpufreq_add_dsu_qos_req(cluster, policy))
 			return NOTIFY_BAD;
+		darkosen_oc_apply_cmdline(policy);
 	} else if (event == CPUFREQ_REMOVE_POLICY) {
 		rockchip_cpufreq_remove_monitor(cluster);
 		rockchip_cpufreq_remove_dsu_qos(cluster);

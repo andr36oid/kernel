@@ -84,6 +84,74 @@ struct otp_opp_info {
 static int pvtm_value[PVTM_CH_MAX][PVTM_SUB_CH_MAX];
 static int lkg_version;
 
+
+static int opp_bin_sel;
+static unsigned long darkosen_max_cpufreq_khz = 1296000;
+
+static int __init darkosen_opp_bin_sel_setup(char *str)
+{
+	unsigned long cpufreq;
+	int r;
+
+	if (str == NULL) {
+		opp_bin_sel = 13;
+		return 0;
+	}
+
+	r = kstrtoul(str, 10, &cpufreq);
+	if (r)
+		return r;
+
+	darkosen_max_cpufreq_khz = cpufreq * 1000;
+
+	switch (cpufreq) {
+	case 408:
+		opp_bin_sel = 39;
+		break;
+	case 600:
+		opp_bin_sel = 35;
+		break;
+	case 1008:
+		opp_bin_sel = 20;
+		break;
+	case 1200:
+		opp_bin_sel = 16;
+		break;
+	case 1296:
+		opp_bin_sel = 13;
+		break;
+	case 1368:
+		opp_bin_sel = 10;
+		break;
+	case 1416:
+		opp_bin_sel = 8;
+		break;
+	case 1440:
+		opp_bin_sel = 7;
+		break;
+	case 1464:
+		opp_bin_sel = 6;
+		break;
+	case 1488:
+		opp_bin_sel = 5;
+		break;
+	case 1512:
+		opp_bin_sel = 4;
+		break;
+	default:
+		pr_info("darkosen-oc: no bin-sel mapping for %lu MHz, using 1296 default\n",
+			cpufreq);
+		opp_bin_sel = 13;
+		break;
+	}
+
+	pr_info("darkosen-oc: cpufreq %lu, max_cpufreq_khz %lu, opp_bin_sel %d\n",
+		cpufreq, darkosen_max_cpufreq_khz, opp_bin_sel);
+
+	return 0;
+}
+__setup("max_cpufreq=", darkosen_opp_bin_sel_setup);
+
 /*
  * temp = temp * 10
  * conv = exp(-ln(1.2) / 5 * (temp - 23)) * 100
@@ -1344,7 +1412,17 @@ void rockchip_of_get_bin_sel(struct device *dev, struct device_node *np,
 {
 	int ret = 0;
 
-	if (!scale_sel || bin < 0)
+	if (!scale_sel)
+		return;
+
+	if (!strncmp(dev_name(dev), "cpu0", 4) && opp_bin_sel) {
+		*scale_sel = opp_bin_sel;
+		dev_info(dev, "darkosen-oc: bin-scale override=%d, dev %s\n",
+			 *scale_sel, dev_name(dev));
+		return;
+	}
+
+	if (bin < 0)
 		return;
 
 	ret = rockchip_get_bin_sel(np, "rockchip,bin-scaling-sel",
@@ -1761,6 +1839,11 @@ int rockchip_adjust_power_scale(struct device *dev, int scale)
 	of_property_read_u32(np, "rockchip,avs-enable", &avs);
 	of_property_read_u32(np, "rockchip,avs", &avs);
 	of_property_read_u32(np, "rockchip,avs-scale", &avs_scale);
+	if (!strncmp(dev_name(dev), "cpu0", 4) && opp_bin_sel) {
+		dev_info(dev, "darkosen-oc: avs_scale override, was %u, maxfreq %lu\n",
+			 avs_scale, darkosen_max_cpufreq_khz);
+		avs_scale = opp_bin_sel;
+	}
 	rockchip_adjust_opp_by_otp(dev, np);
 	rockchip_adjust_opp_by_mbist_vmin(dev, np);
 	rockchip_adjust_opp_by_irdrop(dev, np, &safe_rate, &max_rate);
@@ -1805,6 +1888,9 @@ int rockchip_adjust_power_scale(struct device *dev, int scale)
 				avs_scale);
 			goto out_clk;
 		}
+		if (darkosen_max_cpufreq_khz &&
+		    (long)(darkosen_max_cpufreq_khz * 1000) > scale_rate)
+			scale_rate = darkosen_max_cpufreq_khz * 1000;
 		dev_dbg(dev, "scale_rate=%lu\n", scale_rate);
 		ret = rockchip_adjust_opp_table(dev, scale_rate);
 		if (ret)
@@ -1820,6 +1906,9 @@ int rockchip_adjust_power_scale(struct device *dev, int scale)
 				target_scale);
 			goto out_clk;
 		}
+		if (darkosen_max_cpufreq_khz &&
+		    (long)(darkosen_max_cpufreq_khz * 1000) > scale_rate)
+			scale_rate = darkosen_max_cpufreq_khz * 1000;
 		dev_dbg(dev, "scale_rate=%lu\n", scale_rate);
 		ret = rockchip_adjust_opp_table(dev, scale_rate);
 		if (ret)
