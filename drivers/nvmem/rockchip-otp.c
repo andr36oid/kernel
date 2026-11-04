@@ -791,6 +791,10 @@ static const char * const px30_otp_clocks[] = {
 	"otp", "apb_pclk", "phy",
 };
 
+static const char * const px30_otp_clocks_legacy[] = {
+	"clk_otp", "pclk_otp", "pclk_otp_phy",
+};
+
 static const struct rockchip_data px30_data = {
 	.size = 0x40,
 	.clocks = px30_otp_clocks,
@@ -989,6 +993,14 @@ static int rockchip_otp_probe(struct platform_device *pdev)
 		otp->clks[i].id = data->clocks[i];
 
 	ret = devm_clk_bulk_get(dev, otp->num_clks, otp->clks);
+	if (ret && ret != -EPROBE_DEFER &&
+	    data->clocks == px30_otp_clocks) {
+		for (i = 0; i < otp->num_clks; ++i)
+			otp->clks[i].id = px30_otp_clocks_legacy[i];
+		ret = devm_clk_bulk_get(dev, otp->num_clks, otp->clks);
+		if (!ret)
+			dev_info(dev, "using legacy 4.4 clock names\n");
+	}
 	if (ret)
 		return ret;
 

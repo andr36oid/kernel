@@ -1303,8 +1303,6 @@ static void rk817_charge_pre_init(struct rk817_charger *charge)
 
 	rk817_charge_set_chrg_finish_condition(charge);
 
-	if (rk817_charge_get_otg_state(charge))
-		rk817_charge_otg_disable(charge);
 	rk817_charge_field_write(charge, OTG_EN, OTG_DISABLE);
 	rk817_charge_set_otg_in(charge, OFFLINE);
 

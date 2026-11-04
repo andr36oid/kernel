@@ -707,6 +707,16 @@ static int ramoops_parse_dt(struct platform_device *pdev,
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
 		rmem = of_reserved_mem_lookup(of_node);
+		if (!rmem) {
+			struct device_node *mem_region;
+
+			/* 4.4 DTB layout: /ramoops with memory-region phandle */
+			mem_region = of_parse_phandle(of_node, "memory-region", 0);
+			if (mem_region) {
+				rmem = of_reserved_mem_lookup(mem_region);
+				of_node_put(mem_region);
+			}
+		}
 		if (rmem) {
 			pdata->mem_size = rmem->size;
 			pdata->mem_address = rmem->base;
