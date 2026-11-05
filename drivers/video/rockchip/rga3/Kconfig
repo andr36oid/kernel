@@ -34,6 +34,14 @@ config ROCKCHIP_RGA_DEBUGGER
 	help
 	  Enabling the debugger of multi RGA, you can use procfs and debugfs for debugging.
 
+config ROCKCHIP_RGA_LEGACY_44_ABI
+	bool "Accept legacy 4.4 RGA2 request layout (dArkOSen)"
+	default n
+	help
+	  Convert RGA_BLIT_SYNC/RGA_BLIT_ASYNC requests sent by old librga
+	  builds that use the 4.4 RGA2 struct rga_req layout into the
+	  current layout. Legacy RGA_BLIT_ASYNC runs synchronously.
+
 config ROCKCHIP_RGA_GENPOOL
 	bool "Use genpool to manage cmd_buf"
 	default n

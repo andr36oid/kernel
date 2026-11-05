@@ -970,6 +970,303 @@ err_free_request_by_id:
 	return ret;
 }
 
+/*
+ * dArkOSen: legacy 4.4 RGA2 ABI for RGA_BLIT_SYNC/RGA_BLIT_ASYNC.
+ * Old librga (linux-rga 2020) sends the 4.4 struct rga_req layout,
+ * which differs from the 5.10 layout (rga_img_info_t grew 48 -> 56).
+ */
+#include <linux/compat.h>
+
+struct rga44_rect {
+	u16 xmin, xmax, ymin, ymax;
+};
+
+struct rga44_color_fill {
+	s16 gr_x_a, gr_y_a, gr_x_b, gr_y_b;
+	s16 gr_x_g, gr_y_g, gr_x_r, gr_y_r;
+};
+
+struct rga44_point {
+	u16 x, y;
+};
+
+struct rga44_line_draw {
+	struct rga44_point start_point;
+	struct rga44_point end_point;
+	u32 color;
+	u32 flag;
+	u32 line_width;
+};
+
+struct rga44_fading {
+	u8 b, g, r, res;
+};
+
+struct rga44_img_info {
+	u64 yrgb_addr;
+	u64 uv_addr;
+	u64 v_addr;
+	u32 format;
+	u16 act_w, act_h, x_offset, y_offset;
+	u16 vir_w, vir_h, endian_mode, alpha_swap;
+};
+
+struct rga44_img_info32 {
+	u32 yrgb_addr;
+	u32 uv_addr;
+	u32 v_addr;
+	u32 format;
+	u16 act_w, act_h, x_offset, y_offset;
+	u16 vir_w, vir_h, endian_mode, alpha_swap;
+};
+
+struct rga44_mmu {
+	u8 mmu_en;
+	u64 base_addr;
+	u32 mmu_flag;
+};
+
+struct rga44_mmu32 {
+	u8 mmu_en;
+	u32 base_addr;
+	u32 mmu_flag;
+};
+
+#define RGA44_REQ_BODY(img_t, addr_t, mmu_t, ptr_t)			\
+	u8 render_mode;							\
+	img_t src;							\
+	img_t dst;							\
+	img_t pat;							\
+	addr_t rop_mask_addr;						\
+	addr_t LUT_addr;						\
+	struct rga44_rect clip;						\
+	s32 sina;							\
+	s32 cosa;							\
+	u16 alpha_rop_flag;						\
+	u8 scale_mode;							\
+	u32 color_key_max;						\
+	u32 color_key_min;						\
+	u32 fg_color;							\
+	u32 bg_color;							\
+	struct rga44_color_fill gr_color;				\
+	struct rga44_line_draw line_draw_info;				\
+	struct rga44_fading fading;					\
+	u8 PD_mode;							\
+	u8 alpha_global_value;						\
+	u16 rop_code;							\
+	u8 bsfilter_flag;						\
+	u8 palette_mode;						\
+	u8 yuv2rgb_mode;						\
+	u8 endian_mode;							\
+	u8 rotate_mode;							\
+	u8 color_fill_mode;						\
+	mmu_t mmu_info;							\
+	u8 alpha_rop_mode;						\
+	u8 src_trans_mode;						\
+	u8 CMD_fin_int_enable;						\
+	ptr_t complete
+
+struct rga44_req {
+	RGA44_REQ_BODY(struct rga44_img_info, u64, struct rga44_mmu, u64);
+};
+
+struct rga44_req32 {
+	RGA44_REQ_BODY(struct rga44_img_info32, u32, struct rga44_mmu32, u32);
+};
+
+#define RGA44_IMG(n, o) do {						\
+	(n)->yrgb_addr = (o)->yrgb_addr;				\
+	(n)->uv_addr = (o)->uv_addr;					\
+	(n)->v_addr = (o)->v_addr;					\
+	(n)->format = (o)->format;					\
+	(n)->act_w = (o)->act_w;					\
+	(n)->act_h = (o)->act_h;					\
+	(n)->x_offset = (o)->x_offset;					\
+	(n)->y_offset = (o)->y_offset;					\
+	(n)->vir_w = (o)->vir_w;					\
+	(n)->vir_h = (o)->vir_h;					\
+	(n)->endian_mode = (o)->endian_mode;				\
+	(n)->alpha_swap = (o)->alpha_swap;				\
+} while (0)
+
+#define RGA44_CONV(n, o) do {						\
+	(n)->render_mode = (o)->render_mode;				\
+	RGA44_IMG(&(n)->src, &(o)->src);				\
+	RGA44_IMG(&(n)->dst, &(o)->dst);				\
+	RGA44_IMG(&(n)->pat, &(o)->pat);				\
+	(n)->rop_mask_addr = (o)->rop_mask_addr;			\
+	(n)->LUT_addr = (o)->LUT_addr;					\
+	(n)->clip.xmin = (o)->clip.xmin;				\
+	(n)->clip.xmax = (o)->clip.xmax;				\
+	(n)->clip.ymin = (o)->clip.ymin;				\
+	(n)->clip.ymax = (o)->clip.ymax;				\
+	(n)->sina = (o)->sina;						\
+	(n)->cosa = (o)->cosa;						\
+	(n)->alpha_rop_flag = (o)->alpha_rop_flag;			\
+	(n)->scale_mode = (o)->scale_mode;				\
+	(n)->color_key_max = (o)->color_key_max;			\
+	(n)->color_key_min = (o)->color_key_min;			\
+	(n)->fg_color = (o)->fg_color;					\
+	(n)->bg_color = (o)->bg_color;					\
+	(n)->gr_color.gr_x_a = (o)->gr_color.gr_x_a;			\
+	(n)->gr_color.gr_y_a = (o)->gr_color.gr_y_a;			\
+	(n)->gr_color.gr_x_b = (o)->gr_color.gr_x_b;			\
+	(n)->gr_color.gr_y_b = (o)->gr_color.gr_y_b;			\
+	(n)->gr_color.gr_x_g = (o)->gr_color.gr_x_g;			\
+	(n)->gr_color.gr_y_g = (o)->gr_color.gr_y_g;			\
+	(n)->gr_color.gr_x_r = (o)->gr_color.gr_x_r;			\
+	(n)->gr_color.gr_y_r = (o)->gr_color.gr_y_r;			\
+	(n)->line_draw_info.start_point.x = (o)->line_draw_info.start_point.x; \
+	(n)->line_draw_info.start_point.y = (o)->line_draw_info.start_point.y; \
+	(n)->line_draw_info.end_point.x = (o)->line_draw_info.end_point.x; \
+	(n)->line_draw_info.end_point.y = (o)->line_draw_info.end_point.y; \
+	(n)->line_draw_info.color = (o)->line_draw_info.color;		\
+	(n)->line_draw_info.flag = (o)->line_draw_info.flag;		\
+	(n)->line_draw_info.line_width = (o)->line_draw_info.line_width; \
+	(n)->fading.b = (o)->fading.b;					\
+	(n)->fading.g = (o)->fading.g;					\
+	(n)->fading.r = (o)->fading.r;					\
+	(n)->fading.res = (o)->fading.res;				\
+	(n)->PD_mode = (o)->PD_mode;					\
+	(n)->alpha_global_value = (o)->alpha_global_value;		\
+	(n)->rop_code = (o)->rop_code;					\
+	(n)->bsfilter_flag = (o)->bsfilter_flag;			\
+	(n)->palette_mode = (o)->palette_mode;				\
+	(n)->yuv2rgb_mode = (o)->yuv2rgb_mode;				\
+	(n)->endian_mode = (o)->endian_mode;				\
+	(n)->rotate_mode = (o)->rotate_mode;				\
+	(n)->color_fill_mode = (o)->color_fill_mode;			\
+	(n)->mmu_info.mmu_en = (o)->mmu_info.mmu_en;			\
+	(n)->mmu_info.base_addr = (o)->mmu_info.base_addr;		\
+	(n)->mmu_info.mmu_flag = (o)->mmu_info.mmu_flag;		\
+	(n)->alpha_rop_mode = (o)->alpha_rop_mode;			\
+	(n)->src_trans_mode = (o)->src_trans_mode;			\
+} while (0)
+
+static void rga44_layout_check(void)
+{
+	/* 64-bit userspace layout (old librga, aarch64) */
+	BUILD_BUG_ON(sizeof(struct rga44_img_info) != 48);
+	BUILD_BUG_ON(offsetof(struct rga44_req, src) != 8);
+	BUILD_BUG_ON(offsetof(struct rga44_req, dst) != 56);
+	BUILD_BUG_ON(offsetof(struct rga44_req, pat) != 104);
+	BUILD_BUG_ON(offsetof(struct rga44_req, rop_mask_addr) != 152);
+	BUILD_BUG_ON(offsetof(struct rga44_req, clip) != 168);
+	BUILD_BUG_ON(offsetof(struct rga44_req, scale_mode) != 186);
+	BUILD_BUG_ON(offsetof(struct rga44_req, gr_color) != 204);
+	BUILD_BUG_ON(offsetof(struct rga44_req, line_draw_info) != 220);
+	BUILD_BUG_ON(offsetof(struct rga44_req, bsfilter_flag) != 248);
+	BUILD_BUG_ON(offsetof(struct rga44_req, mmu_info) != 256);
+	BUILD_BUG_ON(offsetof(struct rga44_req, alpha_rop_mode) != 280);
+	BUILD_BUG_ON(sizeof(struct rga44_req) != 296);
+	/* 32-bit userspace layout (old librga, armhf) */
+	BUILD_BUG_ON(sizeof(struct rga44_img_info32) != 32);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, src) != 4);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, dst) != 36);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, pat) != 68);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, rop_mask_addr) != 100);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, clip) != 108);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, scale_mode) != 126);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, gr_color) != 144);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, line_draw_info) != 160);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, bsfilter_flag) != 188);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, mmu_info) != 196);
+	BUILD_BUG_ON(offsetof(struct rga44_req32, alpha_rop_mode) != 208);
+	BUILD_BUG_ON(sizeof(struct rga44_req32) != 216);
+}
+
+static long rga_ioctl_blit_legacy44(unsigned long arg, struct rga_session *session)
+{
+	int ret = 0;
+	int request_id;
+	struct rga_req *rga_req;
+	struct rga_user_request kernel_request;
+	struct rga_request *request = NULL;
+	struct rga_pending_request_manager *request_manager = rga_drvdata->pend_request_manager;
+
+	rga44_layout_check();
+
+	rga_req = kzalloc(sizeof(*rga_req), GFP_KERNEL);
+	if (!rga_req)
+		return -ENOMEM;
+
+	if (in_compat_syscall()) {
+		struct rga44_req32 old;
+
+		if (copy_from_user(&old, (void __user *)arg, sizeof(old))) {
+			kfree(rga_req);
+			return -EFAULT;
+		}
+		RGA44_CONV(rga_req, &old);
+	} else {
+		struct rga44_req old;
+
+		if (copy_from_user(&old, (void __user *)arg, sizeof(old))) {
+			kfree(rga_req);
+			return -EFAULT;
+		}
+		RGA44_CONV(rga_req, &old);
+	}
+
+	request_id = rga_request_alloc(0, session);
+	if (request_id < 0) {
+		rga_err("request alloc error!\n");
+		kfree(rga_req);
+		return request_id;
+	}
+
+	/* The 4.4 layout has no fence fields: always run synchronously. */
+	memset(&kernel_request, 0, sizeof(kernel_request));
+	kernel_request.id = request_id;
+	kernel_request.task_ptr = (uint64_t)(unsigned long)rga_req;
+	kernel_request.task_num = 1;
+	kernel_request.sync_mode = RGA_BLIT_SYNC;
+
+	ret = rga_request_check(&kernel_request);
+	if (ret < 0) {
+		rga_err("ID[%d]: user request check error!\n", kernel_request.id);
+		goto err_free_request_by_id;
+	}
+
+	request = rga_request_kernel_config(&kernel_request);
+	if (IS_ERR(request)) {
+		rga_err("ID[%d]: config failed!\n", kernel_request.id);
+		ret = -EFAULT;
+		goto err_free_request_by_id;
+	}
+
+	kfree(rga_req);
+	rga_req = NULL;
+
+	ret = rga_request_submit(request);
+	if (ret < 0)
+		rga_req_err(request, "submit failed!\n");
+
+	mutex_lock(&request_manager->lock);
+	rga_request_put(request);
+	mutex_unlock(&request_manager->lock);
+
+	return ret;
+
+err_free_request_by_id:
+	kfree(rga_req);
+
+	mutex_lock(&request_manager->lock);
+
+	request = rga_request_lookup(request_manager, request_id);
+	if (IS_ERR_OR_NULL(request)) {
+		rga_err("can not find request from id[%d]", request_id);
+		mutex_unlock(&request_manager->lock);
+		return -EINVAL;
+	}
+
+	rga_request_free(request);
+
+	mutex_unlock(&request_manager->lock);
+
+	return ret;
+}
+
 static long rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 {
 	int ret = 0;
@@ -1013,7 +1310,10 @@ static long rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 	switch (cmd) {
 	case RGA_BLIT_SYNC:
 	case RGA_BLIT_ASYNC:
-		ret = rga_ioctl_blit(arg, cmd, session);
+		if (IS_ENABLED(CONFIG_ROCKCHIP_RGA_LEGACY_44_ABI))
+			ret = rga_ioctl_blit_legacy44(arg, session);
+		else
+			ret = rga_ioctl_blit(arg, cmd, session);
 
 		break;
 	case RGA_CACHE_FLUSH:
