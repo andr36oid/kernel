@@ -649,6 +649,8 @@ dw_mipi_dsi_get_lane_mbps(void *priv_data, const struct drm_display_mode *mode,
 		phy_mipi_dphy_get_default_config(target_pclk * USEC_PER_SEC,
 						 bpp, lanes,
 						 &dsi->phy_opts.mipi_dphy);
+		/* dArkOSen: request the target lane rate directly, as 4.4 did */
+		dsi->phy_opts.mipi_dphy.hs_clk_rate = target_mbps * USEC_PER_SEC;
 		ret = phy_set_mode(dsi->phy, PHY_MODE_MIPI_DPHY);
 		if (ret) {
 			DRM_DEV_ERROR(dsi->dev,
