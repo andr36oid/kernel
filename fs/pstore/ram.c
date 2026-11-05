@@ -670,9 +670,24 @@ static int ramoops_parse_dt_u32(struct platform_device *pdev,
 				u32 default_value, u32 *value)
 {
 	u32 val32 = 0;
+	int len = 0;
 	int ret;
 
-	ret = of_property_read_u32(pdev->dev.of_node, propname, &val32);
+	if (of_get_property(pdev->dev.of_node, propname, &len) &&
+	    len == sizeof(u64)) {
+		u64 val64 = 0;
+
+		/* 4.4 DTB layout: 64-bit (two cell) size properties */
+		ret = of_property_read_u64(pdev->dev.of_node, propname, &val64);
+		if (!ret && val64 > U32_MAX) {
+			dev_err(&pdev->dev, "%s %llu > U32_MAX\n",
+				propname, val64);
+			return -EOVERFLOW;
+		}
+		val32 = (u32)val64;
+	} else {
+		ret = of_property_read_u32(pdev->dev.of_node, propname, &val32);
+	}
 	if (ret == -EINVAL) {
 		/* field is missing, use default value. */
 		val32 = default_value;
