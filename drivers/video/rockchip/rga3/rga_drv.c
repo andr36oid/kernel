@@ -1698,6 +1698,17 @@ static int rga_drv_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+	/*
+	 * dArkOSen: 4.4 DTBs mark the RK3326/PX30 RGA as dma-coherent, but it is
+	 * not. With the 5.10 DMA API that skips cache maintenance and the RGA
+	 * reads stale command/MMU data (bus error).
+	 */
+	if ((of_machine_is_compatible("rockchip,rk3326") ||
+	     of_machine_is_compatible("rockchip,px30")) && dev->dma_coherent) {
+		dev_info(dev, "ignoring dma-coherent from DT (RK3326/PX30)\n");
+		dev->dma_coherent = false;
+	}
+
 	scheduler = devm_kzalloc(dev, sizeof(struct rga_scheduler_t), GFP_KERNEL);
 	if (scheduler == NULL) {
 		dev_err(dev, "failed to allocate scheduler.\n");
