@@ -1251,7 +1251,8 @@ static long rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 	switch (cmd)
 	{
 		case RGA_BLIT_SYNC:
-			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, sizeof(struct rga_req))))
+			memset(&req_rga, 0, sizeof(req_rga));
+			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, offsetof(struct rga_req, dither_mode))))
 			{
 				ERR("copy_from_user failed\n");
 				ret = -EFAULT;
@@ -1277,7 +1278,8 @@ static long rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 			}
 			break;
 		case RGA_BLIT_ASYNC:
-			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, sizeof(struct rga_req))))
+			memset(&req_rga, 0, sizeof(req_rga));
+			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, offsetof(struct rga_req, dither_mode))))
 			{
 				ERR("copy_from_user failed\n");
 				ret = -EFAULT;
@@ -1328,7 +1330,8 @@ static long rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 			}
 			break;
 		case RGA_CACHE_FLUSH:
-			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, sizeof(struct rga_req))))
+			memset(&req_rga, 0, sizeof(req_rga));
+			if (unlikely(copy_from_user(&req_rga, (struct rga_req*)arg, offsetof(struct rga_req, dither_mode))))
 			{
 				ERR("copy_from_user failed\n");
 				ret = -EFAULT;
@@ -1437,7 +1440,8 @@ static long compat_rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 
 	switch (cmd) {
 		case RGA_BLIT_SYNC:
-			if (unlikely(copy_from_user(&req_rga, compat_ptr((compat_uptr_t)arg), sizeof(struct rga_req_32))))
+			memset(&req_rga, 0, sizeof(req_rga));
+			if (unlikely(copy_from_user(&req_rga, compat_ptr((compat_uptr_t)arg), offsetof(struct rga_req_32, dither_mode))))
 			{
 				ERR("copy_from_user failed\n");
 				ret = -EFAULT;
@@ -1464,7 +1468,8 @@ static long compat_rga_ioctl(struct file *file, uint32_t cmd, unsigned long arg)
 			}
 			break;
 		case RGA_BLIT_ASYNC:
-			if (unlikely(copy_from_user(&req_rga, compat_ptr((compat_uptr_t)arg), sizeof(struct rga_req_32))))
+			memset(&req_rga, 0, sizeof(req_rga));
+			if (unlikely(copy_from_user(&req_rga, compat_ptr((compat_uptr_t)arg), offsetof(struct rga_req_32, dither_mode))))
 			{
 				ERR("copy_from_user failed\n");
 				ret = -EFAULT;
@@ -1780,6 +1785,13 @@ static int rga2_drv_probe(struct platform_device *pdev)
 	{
 		ERR("failed to allocate driver data.\n");
 		return -ENOMEM;
+	}
+
+	/* dArkOSen: 4.4 DTB marks RGA dma-coherent; PX30 RGA2 is not, keep cache maintenance */
+	if ((of_machine_is_compatible("rockchip,rk3326") ||
+	     of_machine_is_compatible("rockchip,px30")) && pdev->dev.dma_coherent) {
+		dev_info(&pdev->dev, "dArkOSen: ignoring dma-coherent on rk3326/px30\n");
+		pdev->dev.dma_coherent = false;
 	}
 
 	INIT_DELAYED_WORK(&data->power_off_work, rga2_power_off_work);
