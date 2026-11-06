@@ -530,6 +530,7 @@ static int inno_video_phy_power_on(struct phy *phy)
 	struct inno_video_phy *inno = phy_get_drvdata(phy);
 	enum phy_mode mode = phy_get_mode(phy);
 
+	clk_prepare_enable(inno->ref_clk);
 	clk_prepare_enable(inno->pclk_host);
 	clk_prepare_enable(inno->pclk_phy);
 	pm_runtime_get_sync(inno->dev);
@@ -580,6 +581,7 @@ static int inno_video_phy_power_off(struct phy *phy)
 	pm_runtime_put(inno->dev);
 	clk_disable_unprepare(inno->pclk_phy);
 	clk_disable_unprepare(inno->pclk_host);
+	clk_disable_unprepare(inno->ref_clk);
 
 	return 0;
 }
