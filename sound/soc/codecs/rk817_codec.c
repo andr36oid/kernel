@@ -1395,13 +1395,20 @@ static int rk817_suspend(struct snd_soc_component *component)
 static int rk817_resume(struct snd_soc_component *component)
 {
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	unsigned int vol_l, vol_r;
 
-	if (rk817->resume_path) {
-		if (rk817->capture_path != MIC_OFF)
-			rk817_capture_path_config(component, OFF, rk817->capture_path);
-		if (rk817->playback_path != OFF)
-			rk817_playback_path_config(component, OFF, rk817->playback_path);
-	}
+	/* dArkOSen: save volume, power-up list resets DDAC_VOL to 0x0a */
+	vol_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
+	vol_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
+
+	/* dArkOSen: always restore paths on resume (as 4.4) */
+	if (rk817->capture_path != MIC_OFF)
+		rk817_capture_path_config(component, MIC_OFF, rk817->capture_path);
+	if (rk817->playback_path != OFF)
+		rk817_playback_path_config(component, OFF, rk817->playback_path);
+
+	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL, vol_l);
+	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR, vol_r);
 
 	return 0;
 }
