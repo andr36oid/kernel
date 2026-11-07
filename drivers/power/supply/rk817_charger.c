@@ -33,6 +33,7 @@
 #include <linux/rtc.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
+#include <linux/pm_wakeup.h>
 
 static int dbg_enable;
 module_param_named(dbg_level, dbg_enable, int, 0644);
@@ -276,13 +277,20 @@ struct charger_platform_data {
 
 	u32 power_dc2otg;
 	u32 dc_det_level;
+	/* andr36oid,dc-det-needs-power: the detect pin alone can't be trusted */
+	bool dc_det_needs_power;
+	/*
+	 * andr36oid,boost-only-for-otg: one port for charging and OTG, fed
+	 * straight from the boost; the boost runs only while an OTG device
+	 * asks for 5 V
+	 */
+	bool boost_only_for_otg;
 	int dc_det_pin;
 	bool support_dc_det;
 	int virtual_power;
 	int sample_res;
 	int otg5v_suspend_enable;
 	bool extcon;
-	int gate_function_disable;
 };
 
 struct rk817_charger {
@@ -316,6 +324,8 @@ struct rk817_charger {
 	u8 usb_in;
 	u8 otg_in;
 	u8 dc_in;
+	/* andr36oid: interrupt counts for the charging diagnostics screen */
+	atomic_t plugin_irqs, plugout_irqs, dc_det_irqs;
 	u8 prop_status;
 
 	u32 max_input_current;
@@ -332,7 +342,16 @@ struct rk817_charger {
 	u8 plugin_trigger;
 	u8 plugout_trigger;
 	int plugin_irq;
+	/* andr36oid: DC checks left while the pin is in but the PMIC sees no power yet */
+	int dc_retries;
 	int plugout_irq;
+	/* held while a charger is in: no deep sleep on the charger */
+	struct wakeup_source *charging_ws;
+	/* andr36oid,usb-host-supply: on = host mode, off = charge mode */
+	struct regulator *usb_host_reg;
+	int usb_mode_host;
+	/* charge_current_ma in sysfs: 0 = the DT's max_chrg_current */
+	u32 user_chrg_current;
 };
 
 static enum power_supply_property rk817_ac_props[] = {
@@ -678,38 +697,50 @@ static void rk817_charge_ilimit_enable(struct rk817_charger *charge)
 	rk817_charge_field_write(charge, USB_ILIM_EN, ENABLE);
 }
 
+/*
+ * andr36oid: Kernel Tweaks, off by default. The input current limit is the
+ * nearest step instead of the one below: the EE clones' 800 mA is then 850 mA
+ * instead of 450 mA.
+ */
+static bool input_nearest_step;
+module_param(input_nearest_step, bool, 0644);
+MODULE_PARM_DESC(input_nearest_step, "Input current limit: nearest step, not the one below");
+
 static void rk817_charge_set_input_current(struct rk817_charger *charge,
 					   int input_current)
 {
+	static const struct { int ma; int sel; } steps[] = {
+		{ 80, INPUT_CUR_80MA }, { 450, INPUT_CUR_450MA },
+		{ 850, INPUT_CUR_850MA }, { 1500, INPUT_CUR_1500MA },
+		{ 1750, INPUT_CUR_1750MA }, { 2000, INPUT_CUR_2000MA },
+		{ 2500, INPUT_CUR_2500MA }, { 3000, INPUT_CUR_3000MA },
+	};
+	int i, best = 0;
+
 	if (input_current < 80 || input_current > 3000)
 		dev_err(charge->dev, "the input current is error.\n");
 
-	if (input_current < 450)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_80MA);
-	else if (input_current < 850)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_450MA);
-	else if (input_current < 1500)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_850MA);
-	else if (input_current < 1750)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_1500MA);
-	else if (input_current < 2000)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_1750MA);
-	else if (input_current < 2500)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_2000MA);
-	else if (input_current < 3000)
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_2500MA);
-	else
-		rk817_charge_field_write(charge, USB_ILIM_SEL,
-					 INPUT_CUR_3000MA);
+	for (i = 1; i < ARRAY_SIZE(steps); i++)
+		if (input_nearest_step ?
+		    abs(steps[i].ma - input_current) <
+		    abs(steps[best].ma - input_current) :
+		    steps[i].ma <= input_current)
+			best = i;
+	rk817_charge_field_write(charge, USB_ILIM_SEL, steps[best].sel);
 
 	rk817_charge_ilimit_enable(charge);
+
+	/*
+	 * PMIC_CHRG_IN goes back to its reset value (4.4 V input voltage
+	 * limit) when the charger is unplugged (found by the mainline
+	 * rk817_charger driver, which sets it again on every plug). Probe
+	 * only set it once, so set the DT's min_input_voltage again with
+	 * every input current change: a weak charger or a long cable then
+	 * gets the same protection on every plug-in, not only the first.
+	 */
+	if (charge->min_input_voltage >= 4000)
+		rk817_charge_set_input_voltage(charge,
+					       charge->min_input_voltage);
 }
 
 static void rk817_charge_set_chrg_term_mod(struct rk817_charger *charge,
@@ -778,21 +809,50 @@ static int rk817_charge_get_dsoc(struct rk817_charger *charge)
 	return soc_save / 1000;
 }
 
+/*
+ * andr36oid: consoles with one USB-C port for charging and OTG (Diium D-28S) have
+ * a pin that puts the port in host mode: OTG devices are seen and powered, and the
+ * charge input is cut. So host mode unless a charger is in, and always while an
+ * OTG device is in (its own 5 V must not count as a charger). Without the DT
+ * property nothing happens here.
+ */
+static void rk817_charge_set_usb_mode(struct rk817_charger *charge)
+{
+	int host;
+
+	if (!charge->usb_host_reg)
+		return;
+	host = charge->otg_in || !charge->dc_in;
+	if (host == charge->usb_mode_host)
+		return;
+	charge->usb_mode_host = host;
+	if (host ? regulator_enable(charge->usb_host_reg) :
+		   regulator_disable(charge->usb_host_reg))
+		dev_err(charge->dev, "USB port mode not switched\n");
+	dev_info(charge->dev, "USB port in %s mode\n", host ? "host (OTG)" : "charge");
+}
+
 static void rk817_charge_set_otg_in(struct rk817_charger *charge, int online)
 {
 	charge->otg_in = online;
+	rk817_charge_set_usb_mode(charge);
 }
+
+static void rk817_charge_dump_regs(struct rk817_charger *charge, const char *why);
 
 static void rk817_charge_set_chrg_param(struct rk817_charger *charge,
 					enum charger_t charger)
 {
+	/* again on every plug-in, like the input voltage limit */
+	rk817_charge_set_chrg_current(charge, charge->max_chrg_current);
+
 	switch (charger) {
 	case USB_TYPE_NONE_CHARGER:
 		charge->usb_in = 0;
 		charge->ac_in = 0;
 		if (charge->dc_in == 0) {
 			charge->prop_status = POWER_SUPPLY_STATUS_DISCHARGING;
-			rk817_charge_set_input_current(charge, INPUT_450MA);
+			rk817_charge_set_input_current(charge, INPUT_1500MA);
 		}
 		power_supply_changed(charge->usb_psy);
 		power_supply_changed(charge->ac_psy);
@@ -802,7 +862,7 @@ static void rk817_charge_set_chrg_param(struct rk817_charger *charge,
 		charge->ac_in = 0;
 		charge->prop_status = POWER_SUPPLY_STATUS_CHARGING;
 		if (charge->dc_in == 0)
-			rk817_charge_set_input_current(charge, INPUT_450MA);
+			rk817_charge_set_input_current(charge, INPUT_1500MA);
 		power_supply_changed(charge->usb_psy);
 		power_supply_changed(charge->ac_psy);
 		break;
@@ -834,9 +894,9 @@ static void rk817_charge_set_chrg_param(struct rk817_charger *charge,
 			charge->ac_in = 0;
 			charge->usb_in = 0;
 			charge->prop_status = POWER_SUPPLY_STATUS_DISCHARGING;
-			rk817_charge_set_input_current(charge, INPUT_450MA);
+			rk817_charge_set_input_current(charge, INPUT_1500MA);
 		} else if (charge->usb_in) {
-			rk817_charge_set_input_current(charge, INPUT_450MA);
+			rk817_charge_set_input_current(charge, INPUT_1500MA);
 			charge->prop_status = POWER_SUPPLY_STATUS_CHARGING;
 		}
 		power_supply_changed(charge->usb_psy);
@@ -844,12 +904,77 @@ static void rk817_charge_set_chrg_param(struct rk817_charger *charge,
 		break;
 	default:
 		charge->prop_status = POWER_SUPPLY_STATUS_DISCHARGING;
-		rk817_charge_set_input_current(charge, INPUT_450MA);
+		rk817_charge_set_input_current(charge, INPUT_1500MA);
 		break;
 	}
 
+	/* for problem reports: which charger it took this for and what it may draw */
+	if (charger == USB_TYPE_USB_CHARGER || charger == USB_TYPE_CDP_CHARGER)
+		dev_info(charge->dev, "%s plugged in: charge %u mA, input 1500 mA\n",
+			 charger == USB_TYPE_USB_CHARGER ? "USB port" : "USB charging port",
+			 charge->max_chrg_current);
+	else if (charger == USB_TYPE_AC_CHARGER || charger == DC_TYPE_DC_CHARGER)
+		dev_info(charge->dev, "%s plugged in: charge %u mA, input %u mA\n",
+			 charger == USB_TYPE_AC_CHARGER ? "Wall charger" : "DC charger",
+			 charge->max_chrg_current, charge->max_input_current);
+	if (charger != USB_TYPE_NONE_CHARGER && charger != DC_TYPE_NONE_CHARGER)
+		rk817_charge_dump_regs(charge, "plugged in");
+
 	if (rk817_charge_online(charge) && rk817_charge_get_dsoc(charge) == 100)
 		charge->prop_status = POWER_SUPPLY_STATUS_FULL;
+
+	rk817_charge_set_usb_mode(charge);
+
+	/*
+	 * andr36oid: on the charger Android wakes every 60 s to check the
+	 * battery, and one of those deep sleeps sometimes never wakes again
+	 * (rockchip trust firmware, no source). Stay out of deep sleep while a
+	 * charger is in; the screen still goes off and apps still pause.
+	 */
+	if (charge->charging_ws) {
+		if (rk817_charge_online(charge))
+			__pm_stay_awake(charge->charging_ws);
+		else
+			__pm_relax(charge->charging_ws);
+	}
+}
+
+/*
+ * andr36oid: the PMIC's boost/OTG and charger registers, for consoles that
+ * see a charger but take no power from it
+ */
+static void rk817_charge_log_regs(struct rk817_charger *charge, const char *why)
+{
+	static const u8 regs[] = { 0xb4, 0xe4, 0xe5, 0xe6, 0xeb, 0xec };
+	unsigned int v[ARRAY_SIZE(regs)];
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++)
+		if (regmap_read(charge->regmap, regs[i], &v[i]))
+			v[i] = 0xfff;
+	dev_info(charge->dev, "PMIC (%s): b4=%02x e4=%02x e5=%02x e6=%02x eb=%02x ec=%02x otg5v %d\n",
+		 why, v[0], v[1], v[2], v[3], v[4], v[5],
+		 rk817_charge_get_otg_state(charge));
+}
+
+/*
+ * andr36oid: every PMIC register from 0xB0 (switches, boost, OTG, charger) for
+ * problem reports: at probe before the driver writes anything, that is what
+ * U-Boot left (it charges where the kernel doesn't on the Diium D-28S), and
+ * again whenever a charger is taken as plugged in.
+ */
+static void rk817_charge_dump_regs(struct rk817_charger *charge, const char *why)
+{
+	char line[16 * 3 + 1];
+	unsigned int reg, v;
+	int i;
+
+	for (reg = 0xb0; reg <= 0xff; reg += 16) {
+		for (i = 0; i < 16; i++)
+			snprintf(line + i * 3, 4, " %02x",
+				 regmap_read(charge->regmap, reg + i, &v) ? 0xff : v & 0xff);
+		dev_info(charge->dev, "PMIC regs %s %02x:%s\n", why, reg, line);
+	}
 }
 
 static void rk817_charge_set_otg_state(struct rk817_charger *charge, int state)
@@ -860,6 +985,8 @@ static void rk817_charge_set_otg_state(struct rk817_charger *charge, int state)
 			DBG("otg5v is on yet, ignore..\n");
 		} else {
 
+			if (charge->pdata->boost_only_for_otg)
+				rk817_charge_boost_enable(charge);
 			if (!rk817_charge_get_otg_state(charge)) {
 				rk817_charge_otg_enable(charge);
 				if (!rk817_charge_get_otg_state(charge)) {
@@ -870,6 +997,7 @@ static void rk817_charge_set_otg_state(struct rk817_charger *charge, int state)
 			disable_irq(charge->plugin_irq);
 			disable_irq(charge->plugout_irq);
 			DBG("enable otg5v\n");
+			rk817_charge_log_regs(charge, "OTG 5 V on");
 		}
 		break;
 
@@ -885,9 +1013,12 @@ static void rk817_charge_set_otg_state(struct rk817_charger *charge, int state)
 					return;
 				}
 			}
+			if (charge->pdata->boost_only_for_otg)
+				rk817_charge_boost_disable(charge);
 			enable_irq(charge->plugin_irq);
 			enable_irq(charge->plugout_irq);
 			DBG("disable otg5v\n");
+			rk817_charge_log_regs(charge, "OTG 5 V off");
 		}
 		break;
 	default:
@@ -900,16 +1031,65 @@ static irqreturn_t rk817_charge_dc_det_isr(int irq, void *charger)
 {
 	struct rk817_charger *charge = (struct rk817_charger *)charger;
 
+	atomic_inc(&charge->dc_det_irqs);
 	if (gpio_get_value(charge->pdata->dc_det_pin))
 		irq_set_irq_type(irq, IRQF_TRIGGER_LOW);
 	else
 		irq_set_irq_type(irq, IRQF_TRIGGER_HIGH);
 
+	charge->dc_retries = 10;
 	queue_delayed_work(charge->dc_charger_wq, &charge->dc_work,
 			   msecs_to_jiffies(10));
 
 	return IRQ_HANDLED;
 }
+
+/*
+ * andr36oid: how a DC charger is detected, per console. "pin": the detect pin
+ * alone (the genuine R36S: its PMIC never sets the plug-in flag for the
+ * charger). "power": the pin and the PMIC's plug-in flag (EE clones: their pin
+ * reads "in" with nothing plugged in). "auto": what the device tree says
+ * (andr36oid,dc-det-needs-power), else "pin". Kernel Tweaks sets it at runtime.
+ */
+enum { DC_DET_AUTO, DC_DET_PIN, DC_DET_POWER };
+static const char * const dc_det_modes[] = { "auto", "pin", "power" };
+static int dc_det_mode;
+static struct rk817_charger *dc_det_charger;
+
+static bool rk817_charge_dc_needs_power(struct rk817_charger *charge)
+{
+	if (dc_det_mode == DC_DET_AUTO)
+		return charge->pdata->dc_det_needs_power;
+	return dc_det_mode == DC_DET_POWER;
+}
+
+static int dc_det_mode_set(const char *val, const struct kernel_param *kp)
+{
+	int i = sysfs_match_string(dc_det_modes, val);
+
+	if (i < 0)
+		return i;
+	dc_det_mode = i;
+	/* look again with the new rule */
+	if (dc_det_charger && dc_det_charger->dc_charger_wq) {
+		dc_det_charger->dc_retries = 10;
+		queue_delayed_work(dc_det_charger->dc_charger_wq,
+				   &dc_det_charger->dc_work, 0);
+	}
+	return 0;
+}
+
+static int dc_det_mode_get(char *buf, const struct kernel_param *kp)
+{
+	return sprintf(buf, "%s\n", dc_det_modes[dc_det_mode]);
+}
+
+static const struct kernel_param_ops dc_det_mode_ops = {
+	.set = dc_det_mode_set,
+	.get = dc_det_mode_get,
+};
+module_param_cb(dc_det_mode, &dc_det_mode_ops, NULL, 0644);
+MODULE_PARM_DESC(dc_det_mode, "DC charger detection: auto, pin or power");
 
 static enum charger_t rk817_charge_get_dc_state(struct rk817_charger *charge)
 {
@@ -919,9 +1099,13 @@ static enum charger_t rk817_charge_get_dc_state(struct rk817_charger *charge)
 		return DC_TYPE_NONE_CHARGER;
 
 	level = gpio_get_value(charge->pdata->dc_det_pin);
+	if (level != charge->pdata->dc_det_level)
+		return DC_TYPE_NONE_CHARGER;
+	if (rk817_charge_dc_needs_power(charge) &&
+	    !rk817_charge_get_plug_in_status(charge))
+		return DC_TYPE_NONE_CHARGER;
 
-	return (level == charge->pdata->dc_det_level) ?
-		DC_TYPE_DC_CHARGER : DC_TYPE_NONE_CHARGER;
+	return DC_TYPE_DC_CHARGER;
 }
 
 static void rk817_charge_dc_det_worker(struct work_struct *work)
@@ -931,6 +1115,27 @@ static void rk817_charge_dc_det_worker(struct work_struct *work)
 			struct rk817_charger, dc_work.work);
 
 	charger = rk817_charge_get_dc_state(charge);
+	/* andr36oid: what each check saw, for plug-ins that go unnoticed */
+	dev_info(charge->dev, "DC check (%s): detect pin %d, PMIC plug-in flag %d, charge state %d: %s\n",
+		 rk817_charge_dc_needs_power(charge) ? "pin and power" : "pin",
+		 charge->pdata->support_dc_det ?
+		 gpio_get_value(charge->pdata->dc_det_pin) : -1,
+		 rk817_charge_get_plug_in_status(charge),
+		 rk817_charge_field_read(charge, CHG_STS),
+		 charger == DC_TYPE_DC_CHARGER ? "in" : "out");
+	rk817_charge_log_regs(charge, "DC check");
+	/*
+	 * with "power", the pin can change before the PMIC sees the power:
+	 * look again for 2 s
+	 */
+	if (charger != DC_TYPE_DC_CHARGER && rk817_charge_dc_needs_power(charge) &&
+	    charge->pdata->support_dc_det &&
+	    gpio_get_value(charge->pdata->dc_det_pin) == charge->pdata->dc_det_level &&
+	    charge->dc_retries > 0) {
+		charge->dc_retries--;
+		queue_delayed_work(charge->dc_charger_wq, &charge->dc_work,
+				   msecs_to_jiffies(200));
+	}
 	if (charger == DC_TYPE_DC_CHARGER) {
 		DBG("detect dc charger in..\n");
 		rk817_charge_set_chrg_param(charge, DC_TYPE_DC_CHARGER);
@@ -944,7 +1149,13 @@ static void rk817_charge_dc_det_worker(struct work_struct *work)
 	} else {
 		DBG("detect dc charger out..\n");
 		rk817_charge_set_chrg_param(charge, DC_TYPE_NONE_CHARGER);
-		rk817_charge_boost_enable(charge);
+		/*
+		 * Not with boost-only-for-otg: with "pin and power" the first
+		 * check after a plug-in comes before the PMIC's flag, and the
+		 * boost on made the charger cut its 5 V right away.
+		 */
+		if (!charge->pdata->boost_only_for_otg || charge->otg_in)
+			rk817_charge_boost_enable(charge);
 		/* check otg supply, power on anyway */
 		if (charge->otg_in)
 			rk817_charge_set_otg_state(charge, USB_OTG_POWER_ON);
@@ -982,10 +1193,8 @@ static int rk817_charge_init_dc(struct rk817_charger *charge)
 	}
 
 	level = gpio_get_value(charge->pdata->dc_det_pin);
-	if (level == charge->pdata->dc_det_level)
-		charge->dc_charger = DC_TYPE_DC_CHARGER;
-	else
-		charge->dc_charger = DC_TYPE_NONE_CHARGER;
+	charge->dc_charger = rk817_charge_get_dc_state(charge);
+	dc_det_charger = charge;
 
 	if (level)
 		irq_flags = IRQF_TRIGGER_LOW;
@@ -1016,7 +1225,7 @@ static void rk817_charge_host_evt_worker(struct work_struct *work)
 
 	/* Determine cable/charger type */
 	if (extcon_get_state(edev, EXTCON_USB_VBUS_EN) > 0) {
-		DBG("receive type-c notifier event: OTG ON...\n");
+		dev_info(charge->dev, "USB port asks for OTG 5 V (dc_in %d)\n", charge->dc_in);
 		if (charge->dc_in && charge->pdata->power_dc2otg) {
 			if (charge->otg_in)
 				rk817_charge_set_otg_state(charge,
@@ -1027,7 +1236,7 @@ static void rk817_charge_host_evt_worker(struct work_struct *work)
 		}
 		rk817_charge_set_otg_in(charge, ONLINE);
 	} else if (extcon_get_state(edev, EXTCON_USB_VBUS_EN) == 0) {
-		DBG("receive type-c notifier event: OTG OFF...\n");
+		dev_info(charge->dev, "USB port no longer asks for OTG 5 V\n");
 		rk817_charge_set_otg_state(charge, USB_OTG_POWER_OFF);
 		rk817_charge_set_otg_in(charge, OFFLINE);
 	}
@@ -1287,6 +1496,122 @@ static int rk817_charge_usb_init(struct rk817_charger *charge)
 	return 0;
 }
 
+/*
+ * andr36oid: the charging speed chosen in Settings (charge_current_ma, 0 = the DT's
+ * default). Above the default the charger input may draw more too, up to the PMIC's 3 A;
+ * at or below it the DT's input limit stays.
+ */
+static void rk817_charge_apply_speed(struct rk817_charger *charge)
+{
+	u32 def = charge->pdata->max_chrg_current;
+	u32 chrg = charge->user_chrg_current ? charge->user_chrg_current : def;
+
+	charge->max_chrg_current = chrg;
+	charge->max_input_current = chrg > def ?
+		max_t(u32, charge->pdata->max_input_current, min_t(u32, chrg, 3000)) :
+		charge->pdata->max_input_current;
+	rk817_charge_set_chrg_current(charge, chrg);
+}
+
+static ssize_t charge_current_ma_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct rk817_charger *charge = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%u\n", charge->user_chrg_current);
+}
+
+static ssize_t charge_current_ma_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct rk817_charger *charge = dev_get_drvdata(dev);
+	u32 ma;
+
+	if (kstrtou32(buf, 10, &ma))
+		return -EINVAL;
+	if (ma && (ma < 500 || ma > 3500))
+		return -EINVAL;
+
+	charge->user_chrg_current = ma;
+	rk817_charge_apply_speed(charge);
+	/*
+	 * a charger that is in gets the new input limit now; only one that is
+	 * in right now, the last type seen stays set after it is unplugged
+	 */
+	if (charge->dc_in && charge->dc_charger != DC_TYPE_NONE_CHARGER)
+		rk817_charge_set_chrg_param(charge, DC_TYPE_DC_CHARGER);
+	else if (charge->usb_in && charge->usb_charger != USB_TYPE_NONE_CHARGER &&
+		 charge->usb_charger != USB_TYPE_UNKNOWN_CHARGER)
+		rk817_charge_set_chrg_param(charge, charge->usb_charger);
+	dev_info(dev, "charging speed %u mA (input %u mA)\n",
+		 charge->max_chrg_current, charge->max_input_current);
+	return count;
+}
+static DEVICE_ATTR_RW(charge_current_ma);
+
+static ssize_t charge_current_default_ma_show(struct device *dev,
+					      struct device_attribute *attr,
+					      char *buf)
+{
+	struct rk817_charger *charge = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%u\n", charge->pdata->max_chrg_current);
+}
+static DEVICE_ATTR_RO(charge_current_default_ma);
+
+/*
+ * andr36oid: one key=value per line for the charging diagnostics screen and
+ * the problem report: what the PMIC and the detect pin see right now, and how
+ * often each plug interrupt fired since boot.
+ */
+static ssize_t andr36oid_diag_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct rk817_charger *charge = dev_get_drvdata(dev);
+	static const u8 regs[] = { 0xb4, 0xe4, 0xe5, 0xe6, 0xeb, 0xec };
+	unsigned int v;
+	int i, n = 0;
+
+	n += sprintf(buf + n, "usb_in=%d\ndc_in=%d\notg_in=%d\notg5v=%d\n",
+		     charge->usb_in, charge->dc_in, charge->otg_in,
+		     rk817_charge_get_otg_state(charge));
+	n += sprintf(buf + n, "plug_in=%d\nchg_sts=%d\n",
+		     rk817_charge_get_plug_in_status(charge),
+		     rk817_charge_field_read(charge, CHG_STS));
+	n += sprintf(buf + n, "dc_det_pin=%d\ndc_det_mode=%s\n",
+		     gpio_is_valid(charge->pdata->dc_det_pin) ?
+		     gpio_get_value(charge->pdata->dc_det_pin) : -1,
+		     dc_det_modes[dc_det_mode]);
+	n += sprintf(buf + n, "boost_only_for_otg=%d\n",
+		     charge->pdata->boost_only_for_otg);
+	n += sprintf(buf + n, "irq_plug_in=%d\nirq_plug_out=%d\nirq_dc_det=%d\n",
+		     atomic_read(&charge->plugin_irqs),
+		     atomic_read(&charge->plugout_irqs),
+		     atomic_read(&charge->dc_det_irqs));
+	n += sprintf(buf + n, "charge_ma=%u\ninput_ma=%u\n",
+		     charge->max_chrg_current, charge->max_input_current);
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		if (regmap_read(charge->regmap, regs[i], &v))
+			n += sprintf(buf + n, "reg_%02x=err\n", regs[i]);
+		else
+			n += sprintf(buf + n, "reg_%02x=%02x\n", regs[i], v);
+	}
+	return n;
+}
+static DEVICE_ATTR_RO(andr36oid_diag);
+
+static struct attribute *rk817_charge_speed_attrs[] = {
+	&dev_attr_charge_current_ma.attr,
+	&dev_attr_charge_current_default_ma.attr,
+	&dev_attr_andr36oid_diag.attr,
+	NULL,
+};
+
+static const struct attribute_group rk817_charge_speed_group = {
+	.attrs = rk817_charge_speed_attrs,
+};
+
 static void rk817_charge_pre_init(struct rk817_charger *charge)
 {
 	charge->max_chrg_current = charge->pdata->max_chrg_current;
@@ -1303,11 +1628,11 @@ static void rk817_charge_pre_init(struct rk817_charger *charge)
 
 	rk817_charge_set_chrg_finish_condition(charge);
 
+	if (rk817_charge_get_otg_state(charge))
+		rk817_charge_otg_disable(charge);
 	rk817_charge_field_write(charge, OTG_EN, OTG_DISABLE);
 	rk817_charge_set_otg_in(charge, OFFLINE);
-
-	if (!charge->pdata->gate_function_disable)
-		rk817_charge_sys_can_sd_disable(charge);
+	rk817_charge_sys_can_sd_disable(charge);
 	rk817_charge_usb_to_sys_enable(charge);
 	rk817_charge_enable_charge(charge);
 
@@ -1421,11 +1746,6 @@ static int rk817_charge_parse_dt(struct rk817_charger *charge)
 		dev_err(dev, "otg5v_suspend_enable missing!\n");
 	}
 
-	ret = of_property_read_u32(np, "gate_function_disable",
-				   &pdata->gate_function_disable);
-	if (ret < 0)
-		dev_err(dev, "gate_function_disable missing!\n");
-
 	if (!is_battery_exist(charge))
 		pdata->virtual_power = 1;
 
@@ -1448,6 +1768,10 @@ static int rk817_charge_parse_dt(struct rk817_charger *charge)
 			return -EINVAL;
 		}
 	}
+	pdata->dc_det_needs_power =
+		of_property_read_bool(np, "andr36oid,dc-det-needs-power");
+	pdata->boost_only_for_otg =
+		of_property_read_bool(np, "andr36oid,boost-only-for-otg");
 
 	DBG("input_current:%d\n"
 		"input_min_voltage: %d\n"
@@ -1477,13 +1801,17 @@ static void rk817_charge_irq_delay_work(struct work_struct *work)
 			struct rk817_charger, irq_work.work);
 
 	if (charge->plugin_trigger) {
-		DBG("pmic: plug in\n");
+		dev_info(charge->dev, "PMIC: power in\n");
 		charge->plugin_trigger = 0;
 		if (charge->pdata->extcon)
 			queue_delayed_work(charge->usb_charger_wq, &charge->usb_work,
 					   msecs_to_jiffies(10));
+		/* andr36oid: with "power", now the PMIC sees it */
+		if (charge->dc_charger_wq && rk817_charge_dc_needs_power(charge))
+			queue_delayed_work(charge->dc_charger_wq, &charge->dc_work,
+					   msecs_to_jiffies(10));
 	} else if (charge->plugout_trigger) {
-		DBG("pmic: plug out\n");
+		dev_info(charge->dev, "PMIC: power out\n");
 		charge->plugout_trigger = 0;
 		rk817_charge_set_chrg_param(charge, USB_TYPE_NONE_CHARGER);
 		rk817_charge_set_chrg_param(charge, DC_TYPE_NONE_CHARGER);
@@ -1497,7 +1825,10 @@ static irqreturn_t rk817_plug_in_isr(int irq, void *cg)
 	struct rk817_charger *charge;
 
 	charge = (struct rk817_charger *)cg;
+	atomic_inc(&charge->plugin_irqs);
 	charge->plugin_trigger = 1;
+	/* awake until the charger type is known and Android has seen it */
+	pm_wakeup_event(charge->dev, 3000);
 	queue_delayed_work(charge->usb_charger_wq, &charge->irq_work,
 			   msecs_to_jiffies(10));
 
@@ -1509,7 +1840,10 @@ static irqreturn_t rk817_plug_out_isr(int irq, void *cg)
 	struct rk817_charger *charge;
 
 	charge = (struct rk817_charger *)cg;
+	atomic_inc(&charge->plugout_irqs);
 	charge->plugout_trigger = 1;
+	/* awake until the charger type is known and Android has seen it */
+	pm_wakeup_event(charge->dev, 3000);
 	queue_delayed_work(charge->usb_charger_wq, &charge->irq_work,
 			   msecs_to_jiffies(10));
 
@@ -1554,6 +1888,9 @@ static int rk817_charge_init_irqs(struct rk817_charger *charge)
 
 	charge->plugin_irq = plug_in_irq;
 	charge->plugout_irq = plug_out_irq;
+	/* plugging a charger in (or out) wakes the console */
+	enable_irq_wake(plug_in_irq);
+	enable_irq_wake(plug_out_irq);
 
 	INIT_DELAYED_WORK(&charge->irq_work, rk817_charge_irq_delay_work);
 
@@ -1595,6 +1932,7 @@ static int rk817_charge_probe(struct platform_device *pdev)
 		dev_err(charge->dev, "Failed to initialize regmap\n");
 		return -EINVAL;
 	}
+	rk817_charge_dump_regs(charge, "from U-Boot");
 
 	for (i = 0; i < ARRAY_SIZE(rk817_charge_reg_fields); i++) {
 		const struct reg_field *reg_fields = rk817_charge_reg_fields;
@@ -1616,23 +1954,57 @@ static int rk817_charge_probe(struct platform_device *pdev)
 	}
 	rk817_charge_get_otg5v_regulator(charge);
 
+	/*
+	 * Host mode from early on (regulator-boot-on, before the USB PHY starts:
+	 * raised only here, after it, OTG devices went unseen); the first charger
+	 * check switches to charge mode if a charger is in.
+	 */
+	charge->usb_host_reg = devm_regulator_get_optional(charge->dev,
+							   "andr36oid,usb-host");
+	if (IS_ERR(charge->usb_host_reg)) {
+		if (PTR_ERR(charge->usb_host_reg) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		charge->usb_host_reg = NULL;
+	} else if (regulator_enable(charge->usb_host_reg)) {
+		dev_err(charge->dev, "USB port host mode not switched on\n");
+		charge->usb_host_reg = NULL;
+	} else {
+		charge->usb_mode_host = 1;
+	}
+
 	rk817_charge_pre_init(charge);
+	if (charge->pdata->boost_only_for_otg && !charge->otg_in) {
+		/* the boot loader left it on; a charger saw a power source */
+		rk817_charge_boost_disable(charge);
+		rk817_charge_log_regs(charge, "boost off until OTG");
+	}
+
+	/* Settings > Battery > Battery details > Charging speed */
+	if (devm_device_add_group(charge->dev, &rk817_charge_speed_group))
+		dev_warn(charge->dev, "no charging speed setting\n");
+
+	device_init_wakeup(charge->dev, true);
+	charge->charging_ws = wakeup_source_register(charge->dev,
+						     "rk817_charging");
 
 	ret = rk817_charge_init_power_supply(charge);
 	if (ret) {
 		dev_err(charge->dev, "init power supply fail!\n");
+		wakeup_source_unregister(charge->charging_ws);
 		return ret;
 	}
 
 	ret = rk817_charge_init_dc(charge);
 	if (ret) {
 		dev_err(charge->dev, "init dc failed!\n");
+		wakeup_source_unregister(charge->charging_ws);
 		return ret;
 	}
 
 	ret = rk817_charge_usb_init(charge);
 	if (ret) {
 		dev_err(charge->dev, "init usb failed!\n");
+		wakeup_source_unregister(charge->charging_ws);
 		return ret;
 	}
 
@@ -1683,6 +2055,7 @@ irq_fail:
 		rk_bc_detect_notifier_unregister(&charge->bc_nb);
 	}
 
+	wakeup_source_unregister(charge->charging_ws);
 	return ret;
 }
 
