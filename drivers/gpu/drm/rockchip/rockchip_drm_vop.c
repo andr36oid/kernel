@@ -585,9 +585,12 @@ static bool has_rb_swapped(uint32_t version, uint32_t format)
 	 * check for 3.x to also only rb swap BGR888 for unknown vop version
 	 */
 	case DRM_FORMAT_RGB888:
-		return VOP_MAJOR(version) == 3;
+		/* dArkOSen: PX30 VOP 2.6 treats rgb888 as bgr888 (4.4 behaviour) */
+		return VOP_MAJOR(version) == 3 ||
+		       (VOP_MAJOR(version) == 2 && VOP_MINOR(version) == 6);
 	case DRM_FORMAT_BGR888:
-		return VOP_MAJOR(version) != 3;
+		return VOP_MAJOR(version) != 3 &&
+		       !(VOP_MAJOR(version) == 2 && VOP_MINOR(version) == 6);
 	default:
 		return false;
 	}
