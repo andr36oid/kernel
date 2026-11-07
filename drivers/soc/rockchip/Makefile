@@ -38,3 +38,5 @@ obj-$(CONFIG_RK_CMA_PROCFS) += rk_cma_procfs.o
 obj-$(CONFIG_RK_DMABUF_PROCFS) += rk_dmabuf_procfs.o
 obj-$(CONFIG_RK_MEMBLOCK_PROCFS) += rk_memblock_procfs.o
 obj-$(CONFIG_ROCKCHIP_MINIDUMP)	+= minidump/
+
+obj-$(CONFIG_ANDR36OID_STATUS_LED) += andr36oid_status_led.o

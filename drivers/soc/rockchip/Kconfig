@@ -334,3 +334,7 @@ source "drivers/soc/rockchip/minidump/Kconfig"
 endmenu
 
 endif
+
+config ANDR36OID_STATUS_LED
+	bool "R36S status LED"
+	depends on GPIOLIB && OF && POWER_SUPPLY

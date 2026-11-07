@@ -27,6 +27,9 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/input-polldev.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/ktime.h>
 #include <linux/ioport.h>
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
@@ -35,9 +38,15 @@
 #include <linux/iio/consumer.h>
 #include <linux/iio/types.h>
 #include <linux/property.h>
+#include <linux/gpio/driver.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/pinctrl/pinconf-generic.h>
 #include <linux/of_gpio.h>
 #include <linux/delay.h>
 #include <linux/pwm.h>
+#include <linux/math64.h>
+#include <linux/hrtimer.h>
+#include <linux/power_supply.h>
 
 /*----------------------------------------------------------------------------*/
 #define DRV_NAME "odroidgo3_joypad"
@@ -47,6 +56,23 @@
 #define	ADC_DATA_TUNING(x, p)	((x * p) / 100)
 #define	ADC_TUNING_DEFAULT	180
 #define	CLAMP(x, low, high)  (((x) > (high)) ? (high) : (((x) < (low)) ? (low) : (x)))
+
+/*----------------------------------------------------------------------------*/
+/*
+ * Stick calibration (written from userspace, see the stick_* attributes).
+ * Axes are counted by the event they report, not by amux channel:
+ * 0 = ABS_X, 1 = ABS_Y (left stick), 2 = ABS_RX, 3 = ABS_RY (right stick).
+ * Values are raw readings (mV * button-adc-scale), before any inversion.
+ */
+#define	STICK_AXES		4
+/* smallest travel from center to either end that is taken as real */
+#define	STICK_MIN_SPAN		100
+/* radial dead zone used once calibrated, percent of full travel */
+#define	STICK_DEADZONE_DEFAULT	8
+#define	STICK_DEADZONE_MAX	50
+/* per-stick sensitivity, percent of travel reported; 100 is unchanged */
+#define	STICK_SENS_DEFAULT	100
+#define	STICK_SENS_MIN		10
 
 /*----------------------------------------------------------------------------*/
 /*
@@ -95,24 +121,48 @@ struct analog_mux {
 	int en_gpio;
 };
 
+struct joypad;
+
 struct bt_gpio {
 	/* GPIO Request label */
 	const char *label;
 	/* GPIO Number */
 	int num;
+	/* edge interrupt that starts a poll at once (0 = none) */
+	int irq;
+	struct joypad *joypad;
+	/* when the last change was reported (debounce) */
+	ktime_t changed;
 	/* report type */
 	int report_type;
 	/* report linux code */
 	int linux_code;
+	/* the code the last press went out as, so the release matches it */
+	int sent_code;
 	/* prev button value */
 	bool old_value;
 	/* button press level */
 	bool active_level;
 };
 
+struct stick_cal {
+	bool valid;
+	int min[STICK_AXES], center[STICK_AXES], max[STICK_AXES];
+	/* radial dead zone, percent of full travel */
+	int deadzone;
+};
+
 struct joypad {
 	struct device *dev;
 	int poll_interval;
+	struct input_polled_dev *poll_dev;
+
+	/* button edges start a poll at once, see joypad_button_irq() */
+	bool button_irq;
+	/* after a reported button change, ignore further changes this long */
+	ktime_t button_debounce;
+	/* last poll started by an edge (at most one per ms, see the irq) */
+	ktime_t button_kick;
 
 	/* report enable/disable */
 	bool enable;
@@ -129,8 +179,14 @@ struct joypad {
 	bool invert_absy;
 	bool invert_absrx;
 	bool invert_absry;
-    /* G350 right stick is turned.  Let's turn it back */
-    bool turn_absr;
+	/* andr36oid,no-sticks: a board without sticks, no stick axes at all */
+	bool no_sticks;
+	/* left and right stick reported as each other (stick_swap) */
+	bool stick_swap;
+	/* physical sticks held at centre (stick_off): bit 0 left, bit 1 right */
+	unsigned int stick_off;
+	/* per-stick sensitivity, percent of travel: [0] left, [1] right */
+	unsigned int stick_sens[2];
 
 	/* report interval (ms) */
 	int bt_gpio_count;
@@ -154,17 +210,116 @@ struct joypad {
 	/* pwm device for rumble*/
 	struct input_dev *input;
 	struct pwm_device *pwm;
+	/* motor on a plain GPIO (on/off) instead of the PWM, from DT */
+	struct gpio_desc *rumble_gpio;
 	struct work_struct play_work;
+	/* a motor the DT describes (PWM or GPIO); without one, no FF_RUMBLE */
+	bool rumble;
+	/* percent of the asked strength the motor gets, rumble_strength */
+	u32 rumble_strength;
 	u16 level;
 	u16 boost_weak;
 	u16 boost_strong;
+
+	/* stick calibration, protected by lock */
+	struct stick_cal cal;
+	/* last raw reading and calibrated value per axis (see stick_axis) */
+	int stick_raw[STICK_AXES];
+	int stick_norm[STICK_AXES];
+
+	/*
+	 * Stick-ring RGB LEDs (R36 Ultra and clones that wire them). Plain
+	 * on/off GPIOs, so the effects engine software-PWMs them from an
+	 * hrtimer to get per-channel brightness (breathing, colour mixing).
+	 * One shared trio by default; an optional second ("right") trio lets
+	 * a board drive the two rings independently. See the LED_* block.
+	 */
+	bool led_have;				/* DT gave at least the shared trio */
+	bool led_dual;				/* DT gave an independent right trio */
+	struct gpio_desc *led_gpio[2][3];	/* [ring][0=R,1=G,2=B] */
+	struct hrtimer led_timer;		/* software-PWM carrier */
+	ktime_t led_substep;			/* carrier sub-step period */
+	spinlock_t led_lock;			/* guards mode/colour/duty */
+	int led_mode;				/* LED_MODE_* */
+	u8 led_color[2][3];			/* static/breathing target per ring */
+	u8 led_brightness;			/* 0..255 overall ceiling */
+	u8 led_speed;				/* 1..100 effect rate */
+	u32 led_phase;				/* animation phase */
+	u8 led_duty[2][3];			/* live duty 0..LED_PWM_STEPS */
+	u8 led_pwm_pos;				/* carrier position */
+	bool led_running;			/* carrier armed */
+	bool led_dead;				/* set in remove; blocks re-arm */
+	int led_batt_div;			/* battery-mode sample divider */
+	u8 led_batt_rgb[3];			/* cached battery-mode colour */
 };
+
+/*----------------------------------------------------------------------------*/
+static int stick_axis(int report_type)
+{
+	switch (report_type) {
+	case ABS_X:	return 0;
+	case ABS_Y:	return 1;
+	case ABS_RX:	return 2;
+	case ABS_RY:	return 3;
+	default:	return -1;
+	}
+}
+
+/* Raw reading -> -range..range, center at 0, the stored ends at +-range. */
+static int stick_normalize(const struct stick_cal *cal, int axis, int raw,
+			   int range)
+{
+	int center = cal->center[axis];
+	s64 v;
+
+	if (raw >= center)
+		v = div_s64((s64)(raw - center) * range,
+			    cal->max[axis] - center);
+	else
+		v = div_s64((s64)(raw - center) * range,
+			    center - cal->min[axis]);
+
+	return (int)clamp_t(s64, v, -range, range);
+}
+
+/*
+ * Radial dead zone for one stick. Inside it both axes read 0; outside it the
+ * travel is stretched again, so the output starts at 0 instead of jumping to
+ * the dead zone edge and still reaches +-range.
+ */
+static void stick_apply_deadzone(int *x, int *y, int deadzone, int range)
+{
+	unsigned long m = int_sqrt((unsigned long)((s64)*x * *x + (s64)*y * *y));
+	int dz = range * deadzone / 100;
+	s64 div;
+
+	if (m <= (unsigned long)dz) {
+		*x = 0;
+		*y = 0;
+		return;
+	}
+	if (!dz)
+		return;
+
+	div = (s64)m * (range - dz);
+	*x = (int)clamp_t(s64, div64_s64((s64)*x * (s64)(m - dz) * range, div),
+			  -range, range);
+	*y = (int)clamp_t(s64, div64_s64((s64)*y * (s64)(m - dz) * range, div),
+			  -range, range);
+}
 
 static int pwm_vibrator_start(struct joypad *joypad)
 {
 	struct device *pdev = joypad->input->dev.parent;
 	struct pwm_state state;
 	int err;
+
+	if (!joypad->rumble)
+		return 0;
+	if (joypad->rumble_gpio) {
+		gpiod_set_value_cansleep(joypad->rumble_gpio, 1);
+		return 0;
+	}
 
 	pwm_get_state(joypad->pwm, &state);
 	pwm_set_relative_duty_cycle(&state, joypad->level, 0xffff);
@@ -181,6 +336,12 @@ static int pwm_vibrator_start(struct joypad *joypad)
 
 static void pwm_vibrator_stop(struct joypad *joypad)
 {
+	if (!joypad->rumble)
+		return;
+	if (joypad->rumble_gpio) {
+		gpiod_set_value_cansleep(joypad->rumble_gpio, 0);
+		return;
+	}
 	pwm_disable(joypad->pwm);
 }
 
@@ -246,7 +407,6 @@ __setup("button-adc-deadzone=", button_adc_deadzone);
 /*----------------------------------------------------------------------------*/
 static int joypad_amux_select(struct analog_mux *amux, int channel)
 {
-
 	/* select mux channel */
 	gpio_set_value(amux->en_gpio, 0);
 
@@ -496,8 +656,8 @@ static ssize_t joypad_store_amux_debug(struct device *dev,
 
 	joypad->debug_ch = simple_strtoul(buf, NULL, 10);
 
-	/* if error than default setting(debug_ch = 0) */
-	if (joypad->debug_ch > joypad->amux_count)
+	/* valid channels are 0..amux_count-1; reset out-of-range to 0 */
+	if (joypad->debug_ch >= joypad->amux_count)
 		joypad->debug_ch = 0;
 
 	return count;
@@ -513,12 +673,17 @@ static ssize_t joypad_show_amux_debug(struct device *dev,
 	struct analog_mux *amux = joypad->amux;
 	ssize_t pos;
 	int value;
+	bool was_enabled;
 
 	mutex_lock(&joypad->lock);
 
-	/* disable poll driver */
-	if (joypad->enable)
-		joypad->enable = false;
+	/*
+	 * Pause the poll driver only for the duration of this read, then
+	 * restore it. Leaving it disabled would brick input on a shipped
+	 * device after a single diagnostic 'cat amux_debug'.
+	 */
+	was_enabled = joypad->enable;
+	joypad->enable = false;
 
 	if (joypad_amux_select(amux, joypad->debug_ch))
 		goto err_out;
@@ -534,6 +699,7 @@ static ssize_t joypad_show_amux_debug(struct device *dev,
 err_out:
 	pos = sprintf(buf, "error : amux setup & adc read!\n");
 out:
+	joypad->enable = was_enabled;
 	mutex_unlock(&joypad->lock);
 	return pos;
 }
@@ -559,8 +725,12 @@ static ssize_t joypad_store_period(struct device *dev,
 	struct platform_device *pdev  = to_platform_device(dev);
 	struct joypad *joypad = platform_get_drvdata(pdev);
 
+	/* no PWM motor (none at all, or one on a GPIO): no period */
+	if (IS_ERR_OR_NULL(joypad->pwm))
+		return -ENODEV;
+
 	mutex_lock(&joypad->lock);
-	pwm_set_period(joypad->pwm, simple_strtoul(buf, NULL, 21));
+	pwm_set_period(joypad->pwm, simple_strtoul(buf, NULL, 10));
 	mutex_unlock(&joypad->lock);
 
 	return count;
@@ -573,8 +743,11 @@ static ssize_t joypad_show_period(struct device *dev,
 {
 	struct platform_device *pdev  = to_platform_device(dev);
 	struct joypad *joypad = platform_get_drvdata(pdev);
-	
-	return sprintf(buf, "%llu\n", (u64)pwm_get_period(joypad->pwm));
+
+	/* reading it used to oops on boards without a PWM motor */
+	if (IS_ERR_OR_NULL(joypad->pwm))
+		return sprintf(buf, "0\n");
+	return sprintf(buf, "%llu\n", (unsigned long long)pwm_get_period(joypad->pwm));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -660,6 +833,822 @@ static DEVICE_ATTR(rumble_boost_weak, S_IWUSR | S_IRUGO,
 		   joypad_show_boost_weak,
 		   joypad_store_boost_weak);
 
+/*----------------------------------------------------------------------------*/
+/*
+ * ATTRIBUTES:
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_raw [r]
+ *   last raw reading of each axis: "x y rx ry" (mV * adc scale, not inverted,
+ *   not calibrated). For calibration tools.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_cal [rw]
+ *   "off", or 12 numbers: min center max for x, y, rx and ry, in stick_raw
+ *   units. While set, the sticks are scaled from these instead of the
+ *   automatic center taken at open and the DT tuning/deadzone values.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_deadzone [rw]
+ *   radial dead zone in percent (0-50) used while stick_cal is set.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_invert [rw]
+ *   whether each axis is reported backwards: "x y rx ry", 0 or 1 each.
+ *   Starts from the DT's invert-abs* properties; clones that wire a stick
+ *   the other way round can be fixed without a new DTB.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_swap [rw]
+ *   1 reports the left stick as the right one and the other way round, for
+ *   clones with the sticks swapped or players who want them so, their clicks
+ *   (L3/R3) too. stick_raw, stick_cal and stick_invert stay with the
+ *   physical stick.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_off [rw]
+ *   physical sticks that never move: 0 none, 1 the left one, 2 the right one,
+ *   3 both. For consoles with one stick, whose empty stick input only reports
+ *   ghost moves. Goes by the physical stick like stick_invert, so with
+ *   stick_swap the left stick stays off where it is reported. Its axes stay
+ *   (at centre), so swapping still works.
+ *
+ * /sys/devices/platform/odroidgo3-joypad/stick_sensitivity [rw]
+ *   per-stick sensitivity "left right", each 10-100 percent of travel
+ *   (100 is unchanged). Scales the reported travel toward centre, so a
+ *   lower number means a full physical push reports less. Set per side
+ *   because clone sticks are often uneven. Goes by the physical stick like
+ *   stick_off, so with stick_swap the left value follows the left stick to
+ *   where it is reported. Applied after the dead zone, only while
+ *   calibrated (stick_cal set).
+ */
+/*----------------------------------------------------------------------------*/
+static int stick_raw_limit(struct joypad *joypad)
+{
+	return ADC_MAX_VOLTAGE * (joypad->bt_adc_scale ? joypad->bt_adc_scale : 1);
+}
+
+static ssize_t joypad_show_stick_raw(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+
+	return sprintf(buf, "%d %d %d %d\n",
+		       READ_ONCE(joypad->stick_raw[0]),
+		       READ_ONCE(joypad->stick_raw[1]),
+		       READ_ONCE(joypad->stick_raw[2]),
+		       READ_ONCE(joypad->stick_raw[3]));
+}
+
+static DEVICE_ATTR(stick_raw, S_IRUGO, joypad_show_stick_raw, NULL);
+
+/*----------------------------------------------------------------------------*/
+static ssize_t joypad_store_stick_cal(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf,
+				      size_t count)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+	int v[STICK_AXES * 3];
+	int limit = stick_raw_limit(joypad);
+	int axis;
+
+	if (sysfs_streq(buf, "off") || sysfs_streq(buf, "0")) {
+		mutex_lock(&joypad->lock);
+		joypad->cal.valid = false;
+		mutex_unlock(&joypad->lock);
+		dev_info(dev, "stick calibration off\n");
+		return count;
+	}
+
+	if (sscanf(buf, "%d %d %d %d %d %d %d %d %d %d %d %d",
+		   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+		   &v[6], &v[7], &v[8], &v[9], &v[10], &v[11]) != 12)
+		return -EINVAL;
+
+	for (axis = 0; axis < STICK_AXES; axis++) {
+		int min = v[axis * 3], center = v[axis * 3 + 1];
+		int max = v[axis * 3 + 2];
+
+		if (min < 0 || max > limit ||
+		    center - min < STICK_MIN_SPAN ||
+		    max - center < STICK_MIN_SPAN) {
+			dev_warn(dev, "stick calibration axis %d rejected: %d %d %d\n",
+				 axis, min, center, max);
+			return -EINVAL;
+		}
+	}
+
+	mutex_lock(&joypad->lock);
+	for (axis = 0; axis < STICK_AXES; axis++) {
+		joypad->cal.min[axis] = v[axis * 3];
+		joypad->cal.center[axis] = v[axis * 3 + 1];
+		joypad->cal.max[axis] = v[axis * 3 + 2];
+		joypad->stick_norm[axis] = 0;
+	}
+	joypad->cal.valid = true;
+	mutex_unlock(&joypad->lock);
+	dev_info(dev, "stick calibration on\n");
+
+	return count;
+}
+
+static ssize_t joypad_show_stick_cal(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+	struct stick_cal *cal = &joypad->cal;
+	ssize_t pos = 0;
+	int axis;
+
+	mutex_lock(&joypad->lock);
+	if (!cal->valid) {
+		pos = sprintf(buf, "off\n");
+	} else {
+		for (axis = 0; axis < STICK_AXES; axis++)
+			pos += sprintf(&buf[pos], "%s%d %d %d",
+				       axis ? " " : "", cal->min[axis],
+				       cal->center[axis], cal->max[axis]);
+		pos += sprintf(&buf[pos], "\n");
+	}
+	mutex_unlock(&joypad->lock);
+	return pos;
+}
+
+static DEVICE_ATTR(stick_cal, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_cal,
+		   joypad_store_stick_cal);
+
+/*----------------------------------------------------------------------------*/
+static ssize_t joypad_store_stick_deadzone(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf,
+					   size_t count)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+	unsigned int deadzone;
+
+	if (kstrtouint(buf, 10, &deadzone) || deadzone > STICK_DEADZONE_MAX)
+		return -EINVAL;
+
+	mutex_lock(&joypad->lock);
+	joypad->cal.deadzone = deadzone;
+	mutex_unlock(&joypad->lock);
+	return count;
+}
+
+static ssize_t joypad_show_stick_deadzone(struct device *dev,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+
+	return sprintf(buf, "%d\n", READ_ONCE(joypad->cal.deadzone));
+}
+
+static DEVICE_ATTR(stick_deadzone, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_deadzone,
+		   joypad_store_stick_deadzone);
+
+static const int stick_invert_axes[] = { ABS_X, ABS_Y, ABS_RX, ABS_RY };
+
+static struct bt_adc *joypad_axis_adc(struct joypad *joypad, int axis)
+{
+	int nbtn;
+
+	for (nbtn = 0; nbtn < joypad->amux_count; nbtn++)
+		if (joypad->adcs[nbtn].report_type == axis)
+			return &joypad->adcs[nbtn];
+	return NULL;
+}
+
+static ssize_t joypad_store_stick_invert(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf,
+					 size_t count)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+	unsigned int v[ARRAY_SIZE(stick_invert_axes)];
+	struct bt_adc *adc;
+	int i;
+
+	if (sscanf(buf, "%u %u %u %u", &v[0], &v[1], &v[2], &v[3]) != 4)
+		return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(v); i++)
+		if (v[i] > 1)
+			return -EINVAL;
+
+	mutex_lock(&joypad->lock);
+	for (i = 0; i < ARRAY_SIZE(v); i++) {
+		adc = joypad_axis_adc(joypad, stick_invert_axes[i]);
+		if (adc)
+			adc->invert = v[i];
+	}
+	mutex_unlock(&joypad->lock);
+	return count;
+}
+
+static ssize_t joypad_show_stick_invert(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	struct platform_device *pdev  = to_platform_device(dev);
+	struct joypad *joypad = platform_get_drvdata(pdev);
+	struct bt_adc *adc;
+	int i, len = 0;
+
+	for (i = 0; i < ARRAY_SIZE(stick_invert_axes); i++) {
+		adc = joypad_axis_adc(joypad, stick_invert_axes[i]);
+		len += sprintf(buf + len, "%s%d", i ? " " : "",
+			       adc ? READ_ONCE(adc->invert) : 0);
+	}
+	return len + sprintf(buf + len, "\n");
+}
+
+static DEVICE_ATTR(stick_invert, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_invert,
+		   joypad_store_stick_invert);
+
+static ssize_t joypad_store_stick_swap(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	bool swap;
+
+	if (kstrtobool(buf, &swap))
+		return -EINVAL;
+	WRITE_ONCE(joypad->stick_swap, swap);
+	return count;
+}
+
+static ssize_t joypad_show_stick_swap(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%d\n", READ_ONCE(joypad->stick_swap));
+}
+
+static DEVICE_ATTR(stick_swap, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_swap,
+		   joypad_store_stick_swap);
+
+static ssize_t joypad_store_stick_off(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned int off;
+
+	if (kstrtouint(buf, 0, &off) || off > 3)
+		return -EINVAL;
+	WRITE_ONCE(joypad->stick_off, off);
+	return count;
+}
+
+static ssize_t joypad_show_stick_off(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%u\n", READ_ONCE(joypad->stick_off));
+}
+
+static DEVICE_ATTR(stick_off, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_off,
+		   joypad_store_stick_off);
+
+static ssize_t joypad_store_stick_sensitivity(struct device *dev,
+					      struct device_attribute *attr,
+					      const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned int v[2];
+	int i;
+
+	if (sscanf(buf, "%u %u", &v[0], &v[1]) != 2)
+		return -EINVAL;
+	for (i = 0; i < 2; i++)
+		if (v[i] < STICK_SENS_MIN || v[i] > 100)
+			return -EINVAL;
+
+	WRITE_ONCE(joypad->stick_sens[0], v[0]);
+	WRITE_ONCE(joypad->stick_sens[1], v[1]);
+	return count;
+}
+
+static ssize_t joypad_show_stick_sensitivity(struct device *dev,
+					     struct device_attribute *attr,
+					     char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%u %u\n", READ_ONCE(joypad->stick_sens[0]),
+		       READ_ONCE(joypad->stick_sens[1]));
+}
+
+static DEVICE_ATTR(stick_sensitivity, S_IWUSR | S_IRUGO,
+		   joypad_show_stick_sensitivity,
+		   joypad_store_stick_sensitivity);
+
+/*
+ * /sys/devices/platform/odroidgo3_joypad/rumble [r]
+ *   the motor the DT describes: "pwm", "gpio" or "none"
+ * /sys/devices/platform/odroidgo3_joypad/rumble_strength [rw]
+ *   0-100, percent of what a game asks for; 0 keeps the motor still. A
+ *   motor on a plain GPIO is only on or off, so anything above 0 is on.
+ */
+static ssize_t joypad_show_rumble(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%s\n", !joypad->rumble ? "none" :
+		       joypad->rumble_gpio ? "gpio" : "pwm");
+}
+static DEVICE_ATTR(rumble, S_IRUGO, joypad_show_rumble, NULL);
+
+static ssize_t joypad_show_rumble_strength(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct joypad *joypad = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%u\n", joypad->rumble_strength);
+}
+
+static ssize_t joypad_store_rumble_strength(struct device *dev,
+					    struct device_attribute *attr,
+					    const char *buf, size_t count)
+{
+	struct joypad *joypad = dev_get_drvdata(dev);
+	unsigned int v;
+
+	if (kstrtouint(buf, 10, &v) || v > 100)
+		return -EINVAL;
+	mutex_lock(&joypad->lock);
+	joypad->rumble_strength = v;
+	mutex_unlock(&joypad->lock);
+	return count;
+}
+static DEVICE_ATTR(rumble_strength, S_IWUSR | S_IRUGO,
+		   joypad_show_rumble_strength,
+		   joypad_store_rumble_strength);
+
+/*============================================================================*/
+/* Stick-ring RGB LED effects engine                                          */
+/*                                                                            */
+/* The rings are on/off GPIOs. A single hrtimer software-PWMs all channels so */
+/* we get per-channel brightness: that is what makes breathing fade smoothly  */
+/* and lets the three primaries mix into any colour (rainbow, stick hue). The */
+/* carrier only runs while something is lit; OFF stops it. The animation      */
+/* target (duty[]) is recomputed at the much slower poll rate in _tick().     */
+/*============================================================================*/
+#define LED_PWM_STEPS	32	/* brightness levels per channel */
+#define LED_REFRESH_HZ	100	/* full-cycle refresh; carrier = REFRESH*STEPS */
+#define LED_STICK_FULL	1800	/* stick magnitude mapped to full brightness */
+
+enum {
+	LED_MODE_OFF = 0,
+	LED_MODE_STATIC,
+	LED_MODE_BREATHING,
+	LED_MODE_RAINBOW,
+	LED_MODE_STICK,
+	LED_MODE_BATTERY,
+	LED_MODE_COUNT,
+};
+
+static const char *const led_mode_name[LED_MODE_COUNT] = {
+	"off", "static", "breathing", "rainbow", "stick", "battery",
+};
+
+/* h: 0..1535 (6*256), s/v: 0..255 -> out[R,G,B] 0..255. Integer only. */
+static void led_hsv2rgb(u16 h, u8 s, u8 v, u8 out[3])
+{
+	u16 region, rem, p, q, t;
+
+	if (!s) {
+		out[0] = out[1] = out[2] = v;
+		return;
+	}
+	h %= 1536;
+	region = h / 256;
+	rem = h % 256;
+	p = (u16)v * (255 - s) / 255;
+	q = (u16)v * (255 - (u16)s * rem / 256) / 255;
+	t = (u16)v * (255 - (u16)s * (256 - rem) / 256) / 255;
+	switch (region) {
+	case 0:	out[0] = v; out[1] = t; out[2] = p; break;
+	case 1:	out[0] = q; out[1] = v; out[2] = p; break;
+	case 2:	out[0] = p; out[1] = v; out[2] = t; break;
+	case 3:	out[0] = p; out[1] = q; out[2] = v; break;
+	case 4:	out[0] = t; out[1] = p; out[2] = v; break;
+	default:out[0] = v; out[1] = p; out[2] = q; break;
+	}
+}
+
+/* atan2 -> hue 0..1535, scale-free so the stick range does not matter. */
+static u16 led_dir_hue(int y, int x)
+{
+	long ax = abs(x), ay = abs(y);
+	long a;		/* angle within the octant, 0..256 */
+	u16 oct;
+
+	if (!ax && !ay)
+		return 0;
+	if (ax >= ay) {
+		a = ay * 256 / (ax ? ax : 1);		/* 0..256 */
+		oct = (x >= 0) ? (y >= 0 ? 0 : 7)
+			       : (y >= 0 ? 3 : 4);
+	} else {
+		a = ax * 256 / (ay ? ay : 1);
+		oct = (x >= 0) ? (y >= 0 ? 1 : 6)
+			       : (y >= 0 ? 2 : 5);
+	}
+	/* 8 octants of 192 hue units = 1536; fold a into the octant. */
+	switch (oct) {
+	case 0:	return (u16)(a * 192 / 256);
+	case 1:	return (u16)(192 + (256 - a) * 192 / 256);
+	case 2:	return (u16)(384 + a * 192 / 256);
+	case 3:	return (u16)(576 + (256 - a) * 192 / 256);
+	case 4:	return (u16)(768 + a * 192 / 256);
+	case 5:	return (u16)(960 + (256 - a) * 192 / 256);
+	case 6:	return (u16)(1152 + a * 192 / 256);
+	default:return (u16)(1344 + (256 - a) * 192 / 256);
+	}
+}
+
+/* scale a 0..255 channel by the brightness ceiling into a 0..STEPS duty. */
+static u8 led_duty_of(u8 chan, u8 bright)
+{
+	u32 d = (u32)chan * bright * LED_PWM_STEPS / (255 * 255);
+
+	return (u8)min_t(u32, d, LED_PWM_STEPS);
+}
+
+/* PWM carrier: toggles each channel's GPIO against its duty threshold. */
+static enum hrtimer_restart joypad_led_carrier(struct hrtimer *timer)
+{
+	struct joypad *joypad = container_of(timer, struct joypad, led_timer);
+	unsigned long flags;
+	int r, c;
+	u8 pos;
+
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	pos = joypad->led_pwm_pos;
+	for (r = 0; r < 2; r++)
+		for (c = 0; c < 3; c++)
+			if (joypad->led_gpio[r][c])
+				gpiod_set_value(joypad->led_gpio[r][c],
+						joypad->led_duty[r][c] > pos);
+	joypad->led_pwm_pos = (pos + 1) % LED_PWM_STEPS;
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+
+	hrtimer_forward_now(timer, joypad->led_substep);
+	return HRTIMER_RESTART;
+}
+
+static void joypad_led_set_gpios(struct joypad *joypad, int value)
+{
+	int r, c;
+
+	for (r = 0; r < 2; r++)
+		for (c = 0; c < 3; c++)
+			if (joypad->led_gpio[r][c])
+				gpiod_set_value_cansleep(joypad->led_gpio[r][c],
+							 value);
+}
+
+/* battery-mode colour: sampled slowly, cached in led_batt_rgb. */
+static void joypad_led_sample_battery(struct joypad *joypad, u8 rgb[3])
+{
+	struct power_supply *psy = power_supply_get_by_name("battery");
+	union power_supply_propval cap = { .intval = 100 };
+	union power_supply_propval st = { .intval = POWER_SUPPLY_STATUS_UNKNOWN };
+
+	if (psy) {
+		power_supply_get_property(psy, POWER_SUPPLY_PROP_CAPACITY, &cap);
+		power_supply_get_property(psy, POWER_SUPPLY_PROP_STATUS, &st);
+		power_supply_put(psy);
+	}
+	if (st.intval == POWER_SUPPLY_STATUS_FULL || cap.intval >= 98) {
+		rgb[0] = 0; rgb[1] = 255; rgb[2] = 0;		/* green */
+	} else if (st.intval == POWER_SUPPLY_STATUS_CHARGING) {
+		rgb[0] = 255; rgb[1] = 120; rgb[2] = 0;		/* amber */
+	} else if (cap.intval <= 15) {
+		rgb[0] = 255; rgb[1] = 0; rgb[2] = 0;		/* red */
+	} else {
+		/* green->amber across the usable range */
+		u16 h = 42 + (u16)(100 - cap.intval) * 2;	/* ~green..amber */
+		led_hsv2rgb(h, 255, 255, rgb);
+	}
+}
+
+/*
+ * Recompute the live duty from the current mode and advance the animation.
+ * Runs at the poll rate (process context); the carrier reads the duty it
+ * writes. Starts/stops the carrier so a dark console costs nothing.
+ */
+static void joypad_led_tick(struct joypad *joypad)
+{
+	u8 rgb[2][3] = { { 0 } };
+	unsigned long flags;
+	int mode, r, c;
+	u8 bright, speed, color[2][3];
+	bool animated, any = false;
+
+	if (!joypad->led_have)
+		return;
+
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	mode = joypad->led_mode;
+	bright = joypad->led_brightness;
+	speed = joypad->led_speed ? joypad->led_speed : 1;
+	memcpy(color, joypad->led_color, sizeof(color));
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+
+	animated = (mode == LED_MODE_BREATHING || mode == LED_MODE_RAINBOW ||
+		    mode == LED_MODE_STICK || mode == LED_MODE_BATTERY);
+
+	switch (mode) {
+	case LED_MODE_OFF:
+		break;
+	case LED_MODE_STATIC:
+		memcpy(rgb, color, sizeof(rgb));
+		break;
+	case LED_MODE_BREATHING: {
+		u32 ph = joypad->led_phase & 1023;
+		u32 e = ph < 512 ? ph : 1023 - ph;	/* 0..511 triangle */
+
+		e = e * 255 / 511;
+		e = e * e / 255;			/* gamma: dwell low */
+		for (r = 0; r < 2; r++)
+			for (c = 0; c < 3; c++)
+				rgb[r][c] = (u8)((u16)color[r][c] * e / 255);
+		joypad->led_phase += 1 + speed / 6;
+		break;
+	}
+	case LED_MODE_RAINBOW: {
+		u16 h = joypad->led_phase % 1536;
+
+		led_hsv2rgb(h, 255, 255, rgb[0]);
+		memcpy(rgb[1], rgb[0], 3);
+		joypad->led_phase += 1 + speed / 8;
+		break;
+	}
+	case LED_MODE_STICK: {
+		int x = READ_ONCE(joypad->stick_norm[0]);
+		int y = READ_ONCE(joypad->stick_norm[1]);
+		unsigned long m = int_sqrt((unsigned long)((s64)x * x +
+							   (s64)y * y));
+		u16 h = led_dir_hue(y, x);
+		u8 v = (u8)min_t(unsigned long, m * 255 / LED_STICK_FULL, 255);
+
+		/* a dim base so a centred stick still glows the accent colour */
+		if (v < 40) {
+			memcpy(rgb[0], color[0], 3);
+			for (c = 0; c < 3; c++)
+				rgb[0][c] = rgb[0][c] / 6;
+		} else {
+			led_hsv2rgb(h, 255, v, rgb[0]);
+		}
+		memcpy(rgb[1], rgb[0], 3);
+		break;
+	}
+	case LED_MODE_BATTERY:
+		if (--joypad->led_batt_div <= 0) {
+			joypad_led_sample_battery(joypad, joypad->led_batt_rgb);
+			joypad->led_batt_div = LED_REFRESH_HZ; /* ~1s */
+		}
+		/* gentle pulse so it reads as "alive" */
+		{
+			u32 ph = joypad->led_phase & 1023;
+			u32 e = ph < 512 ? ph : 1023 - ph;
+
+			e = 128 + e * 127 / 511;	/* 50%..100% */
+			for (c = 0; c < 3; c++)
+				rgb[0][c] = (u8)((u16)joypad->led_batt_rgb[c] *
+						 e / 255);
+			memcpy(rgb[1], rgb[0], 3);
+		}
+		joypad->led_phase += 1 + speed / 10;
+		break;
+	}
+
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	for (r = 0; r < 2; r++)
+		for (c = 0; c < 3; c++) {
+			joypad->led_duty[r][c] = led_duty_of(rgb[r][c], bright);
+			if (joypad->led_duty[r][c])
+				any = true;
+		}
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+
+	/*
+	 * Serialise the carrier start/stop (a poll tick can race a sysfs
+	 * write). The mutex is never held by the hrtimer callback (it takes
+	 * only led_lock), so hrtimer_cancel() here cannot deadlock.
+	 */
+	mutex_lock(&joypad->lock);
+	if (mode != LED_MODE_OFF && (animated || any) && !joypad->led_dead) {
+		if (!joypad->led_running) {
+			joypad->led_pwm_pos = 0;
+			joypad->led_running = true;
+			hrtimer_start(&joypad->led_timer, joypad->led_substep,
+				      HRTIMER_MODE_REL);
+		}
+	} else if (joypad->led_running) {
+		joypad->led_running = false;
+		/*
+		 * Cancel under ->lock so a concurrent poll tick cannot slip in
+		 * between the store and the cancel and re-arm the carrier we are
+		 * about to kill. hrtimer_cancel() may sleep but the callback
+		 * takes only led_lock, so holding the mutex cannot deadlock.
+		 */
+		hrtimer_cancel(&joypad->led_timer);
+		joypad_led_set_gpios(joypad, 0);
+		mutex_unlock(&joypad->lock);
+		return;
+	}
+	mutex_unlock(&joypad->lock);
+}
+
+/*----------------------------------------------------------------------------*/
+static ssize_t joypad_show_led_mode(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	if (!joypad->led_have)
+		return sprintf(buf, "unsupported\n");
+	return sprintf(buf, "%s\n", led_mode_name[joypad->led_mode]);
+}
+
+static ssize_t joypad_store_led_mode(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned long flags;
+	int i, mode = -1;
+
+	if (!joypad->led_have)
+		return -ENODEV;
+	for (i = 0; i < LED_MODE_COUNT; i++)
+		if (sysfs_streq(buf, led_mode_name[i])) {
+			mode = i;
+			break;
+		}
+	if (mode < 0)
+		return -EINVAL;
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	joypad->led_mode = mode;
+	joypad->led_phase = 0;
+	joypad->led_batt_div = 0;
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+	joypad_led_tick(joypad);
+	return count;
+}
+static DEVICE_ATTR(led_mode, S_IWUSR | S_IRUGO,
+		   joypad_show_led_mode, joypad_store_led_mode);
+
+static ssize_t joypad_show_led_color(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%02x%02x%02x\n", joypad->led_color[0][0],
+		       joypad->led_color[0][1], joypad->led_color[0][2]);
+}
+
+static int joypad_parse_rgb(const char *buf, u8 rgb[3])
+{
+	unsigned int v;
+
+	if (kstrtouint(buf, 16, &v) || v > 0xffffff)
+		return -EINVAL;
+	rgb[0] = (v >> 16) & 0xff;
+	rgb[1] = (v >> 8) & 0xff;
+	rgb[2] = v & 0xff;
+	return 0;
+}
+
+static ssize_t joypad_store_led_color(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned long flags;
+	u8 rgb[3];
+
+	if (!joypad->led_have)
+		return -ENODEV;
+	if (joypad_parse_rgb(buf, rgb))
+		return -EINVAL;
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	memcpy(joypad->led_color[0], rgb, 3);
+	if (!joypad->led_dual)
+		memcpy(joypad->led_color[1], rgb, 3);
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+	joypad_led_tick(joypad);
+	return count;
+}
+static DEVICE_ATTR(led_color, S_IWUSR | S_IRUGO,
+		   joypad_show_led_color, joypad_store_led_color);
+
+static ssize_t joypad_show_led_color_right(struct device *dev,
+					   struct device_attribute *attr,
+					   char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%02x%02x%02x\n", joypad->led_color[1][0],
+		       joypad->led_color[1][1], joypad->led_color[1][2]);
+}
+
+static ssize_t joypad_store_led_color_right(struct device *dev,
+					    struct device_attribute *attr,
+					    const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned long flags;
+	u8 rgb[3];
+
+	if (!joypad->led_dual)
+		return -ENODEV;
+	if (joypad_parse_rgb(buf, rgb))
+		return -EINVAL;
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	memcpy(joypad->led_color[1], rgb, 3);
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+	joypad_led_tick(joypad);
+	return count;
+}
+static DEVICE_ATTR(led_color_right, S_IWUSR | S_IRUGO,
+		   joypad_show_led_color_right, joypad_store_led_color_right);
+
+static ssize_t joypad_show_led_brightness(struct device *dev,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%d\n", joypad->led_brightness);
+}
+
+static ssize_t joypad_store_led_brightness(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned long flags;
+	unsigned int v;
+
+	if (!joypad->led_have)
+		return -ENODEV;
+	if (kstrtouint(buf, 10, &v))
+		return -EINVAL;
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	joypad->led_brightness = (u8)min_t(unsigned int, v, 255);
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+	joypad_led_tick(joypad);
+	return count;
+}
+static DEVICE_ATTR(led_brightness, S_IWUSR | S_IRUGO,
+		   joypad_show_led_brightness, joypad_store_led_brightness);
+
+static ssize_t joypad_show_led_speed(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+
+	return sprintf(buf, "%d\n", joypad->led_speed);
+}
+
+static ssize_t joypad_store_led_speed(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct joypad *joypad = platform_get_drvdata(to_platform_device(dev));
+	unsigned long flags;
+	unsigned int v;
+
+	if (!joypad->led_have)
+		return -ENODEV;
+	if (kstrtouint(buf, 10, &v))
+		return -EINVAL;
+	spin_lock_irqsave(&joypad->led_lock, flags);
+	joypad->led_speed = (u8)clamp_t(unsigned int, v, 1, 100);
+	spin_unlock_irqrestore(&joypad->led_lock, flags);
+	return count;
+}
+static DEVICE_ATTR(led_speed, S_IWUSR | S_IRUGO,
+		   joypad_show_led_speed, joypad_store_led_speed);
+
+/*----------------------------------------------------------------------------*/
 static struct attribute *joypad_attrs[] = {
 	&dev_attr_poll_interval.attr,
 	&dev_attr_adc_fuzz.attr,
@@ -668,8 +1657,22 @@ static struct attribute *joypad_attrs[] = {
 	&dev_attr_adc_cal.attr,
 	&dev_attr_amux_debug.attr,
 	&dev_attr_rumble_period.attr,
+	&dev_attr_rumble.attr,
+	&dev_attr_rumble_strength.attr,
 	&dev_attr_rumble_boost_strong.attr,
 	&dev_attr_rumble_boost_weak.attr,
+	&dev_attr_stick_raw.attr,
+	&dev_attr_stick_cal.attr,
+	&dev_attr_stick_deadzone.attr,
+	&dev_attr_stick_invert.attr,
+	&dev_attr_stick_swap.attr,
+	&dev_attr_stick_off.attr,
+	&dev_attr_stick_sensitivity.attr,
+	&dev_attr_led_mode.attr,
+	&dev_attr_led_color.attr,
+	&dev_attr_led_color_right.attr,
+	&dev_attr_led_brightness.attr,
+	&dev_attr_led_speed.attr,
 	NULL,
 };
 
@@ -679,6 +1682,29 @@ static struct attribute_group joypad_attr_group = {
 
 /*----------------------------------------------------------------------------*/
 /*----------------------------------------------------------------------------*/
+/*
+ * The code a button goes out as: with the sticks swapped (stick_swap), L3 and
+ * R3 swap too. The R36S device trees send them as KEY_BACK and KEY_LEFTMETA
+ * (the keylayout makes them THUMBL/THUMBR), others as BTN_THUMBL/BTN_THUMBR.
+ */
+static int joypad_out_key(struct joypad *joypad, struct input_dev *input,
+			  int type, int code)
+{
+	int other;
+
+	if (type != EV_KEY || !READ_ONCE(joypad->stick_swap))
+		return code;
+	switch (code) {
+	case KEY_BACK:		other = KEY_LEFTMETA; break;
+	case KEY_LEFTMETA:	other = KEY_BACK; break;
+	case BTN_THUMBL:	other = BTN_THUMBR; break;
+	case BTN_THUMBR:	other = BTN_THUMBL; break;
+	default:		return code;
+	}
+	/* a console with one stick click only keeps it where it is */
+	return test_bit(other, input->keybit) ? other : code;
+}
+
 static void joypad_gpio_check(struct input_polled_dev *poll_dev)
 {
 	struct joypad *joypad = poll_dev->private;
@@ -687,36 +1713,134 @@ static void joypad_gpio_check(struct input_polled_dev *poll_dev)
 	for (nbtn = 0; nbtn < joypad->bt_gpio_count; nbtn++) {
 		struct bt_gpio *gpio = &joypad->gpios[nbtn];
 
-		if (gpio_get_value_cansleep(gpio->num) < 0) {
+		value = gpio_get_value_cansleep(gpio->num);
+		if (value < 0) {
 			dev_err(joypad->dev, "failed to get gpio state\n");
 			continue;
 		}
-		value = gpio_get_value(gpio->num);
 		if (value != gpio->old_value) {
+			ktime_t now = ktime_get();
+
+			/* contact bounce right after a change: keep the old state */
+			if (joypad->button_debounce &&
+			    ktime_before(now, ktime_add(gpio->changed,
+						       joypad->button_debounce)))
+				continue;
+			if (value == gpio->active_level)
+				gpio->sent_code = joypad_out_key(joypad,
+						poll_dev->input, gpio->report_type,
+						gpio->linux_code);
+			else if (!gpio->sent_code)
+				gpio->sent_code = gpio->linux_code;
 			input_event(poll_dev->input,
 				gpio->report_type,
-				gpio->linux_code,
+				gpio->sent_code,
 				(value == gpio->active_level) ? 1 : 0);
 			gpio->old_value = value;
+			gpio->changed = now;
 		}
 	}
 	input_sync(poll_dev->input);
 }
 
 /*----------------------------------------------------------------------------*/
+/* the axis an axis is reported as, with the sticks swapped or not */
+static int joypad_out_axis(struct joypad *joypad, int type)
+{
+	if (!READ_ONCE(joypad->stick_swap))
+		return type;
+	switch (type) {
+	case ABS_X:	return ABS_RX;
+	case ABS_Y:	return ABS_RY;
+	case ABS_RX:	return ABS_X;
+	case ABS_RY:	return ABS_Y;
+	}
+	return type;
+}
+
+/* whether the physical stick an axis belongs to is switched off (stick_off) */
+static bool joypad_stick_off(struct joypad *joypad, int type)
+{
+	int axis = stick_axis(type);
+
+	return axis >= 0 && (READ_ONCE(joypad->stick_off) & (1 << (axis / 2)));
+}
+
+static void joypad_stick_report(struct joypad *joypad,
+				struct input_dev *input,
+				const struct stick_cal *cal)
+{
+	int *norm = joypad->stick_norm;
+	int out[STICK_AXES];
+	int nbtn, range = 0;
+	unsigned int sens_l = READ_ONCE(joypad->stick_sens[0]);
+	unsigned int sens_r = READ_ONCE(joypad->stick_sens[1]);
+
+	for (nbtn = 0; nbtn < joypad->amux_count; nbtn++)
+		range = max(range, joypad->adcs[nbtn].max);
+
+	memcpy(out, norm, sizeof(out));
+	stick_apply_deadzone(&out[0], &out[1], cal->deadzone, range);
+	stick_apply_deadzone(&out[2], &out[3], cal->deadzone, range);
+
+	/* scale each stick's travel toward centre to reduce its sensitivity */
+	if (sens_l != 100) {
+		out[0] = out[0] * (int)sens_l / 100;
+		out[1] = out[1] * (int)sens_l / 100;
+	}
+	if (sens_r != 100) {
+		out[2] = out[2] * (int)sens_r / 100;
+		out[3] = out[3] * (int)sens_r / 100;
+	}
+
+	for (nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
+		struct bt_adc *adc = &joypad->adcs[nbtn];
+		int axis = stick_axis(adc->report_type);
+
+		if (axis < 0)
+			continue;
+		adc->value = CLAMP(out[axis], adc->min, adc->max);
+		if (joypad_stick_off(joypad, adc->report_type))
+			adc->value = 0;
+		input_report_abs(input, joypad_out_axis(joypad, adc->report_type),
+			adc->invert ? adc->value * (-1) : adc->value);
+	}
+}
+
 static void joypad_adc_check(struct input_polled_dev *poll_dev)
 {
 	struct joypad *joypad = poll_dev->private;
-	int nbtn;
+	struct stick_cal cal;
+	int nbtn, axis;
+
+	mutex_lock(&joypad->lock);
+	cal = joypad->cal;
+	mutex_unlock(&joypad->lock);
+
+	/* the floating ADC inputs would only report ghost stick moves */
+	if (joypad->no_sticks)
+		return;
 
 	for (nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
 		struct bt_adc *adc = &joypad->adcs[nbtn];
 
 		adc->value = joypad_adc_read(joypad->amux, adc);
 		if (!adc->value) {
-			dev_err(joypad->dev, "%s : saradc channels[%d]!\n",
+			dev_err_ratelimited(joypad->dev, "%s : saradc channels[%d]!\n",
 				__func__, nbtn);
 			continue;
+		}
+
+		axis = stick_axis(adc->report_type);
+		if (axis >= 0) {
+			WRITE_ONCE(joypad->stick_raw[axis], adc->value);
+			/* calibrated: reported for both sticks below */
+			if (cal.valid) {
+				WRITE_ONCE(joypad->stick_norm[axis],
+					stick_normalize(&cal, axis,
+							adc->value, adc->max));
+				continue;
+			}
 		}
 		adc->value = adc->value - adc->cal;
 
@@ -732,13 +1856,25 @@ static void joypad_adc_check(struct input_polled_dev *poll_dev)
 		if (adc->tuning_p && adc->value > 0)
 			adc->value = ADC_DATA_TUNING(adc->value, adc->tuning_p);
 
+		/* per-stick sensitivity, as in joypad_stick_report (uncalibrated) */
+		if (axis >= 0) {
+			unsigned int s = READ_ONCE(joypad->stick_sens[axis / 2]);
+
+			if (s != 100)
+				adc->value = adc->value * (int)s / 100;
+		}
+
 		adc->value = adc->value > adc->max ? adc->max : adc->value;
 		adc->value = adc->value < adc->min ? adc->min : adc->value;
+		if (joypad_stick_off(joypad, adc->report_type))
+			adc->value = 0;
 
 		input_report_abs(poll_dev->input,
-			adc->report_type,
+			joypad_out_axis(joypad, adc->report_type),
 			adc->invert ? adc->value * (-1) : adc->value);
 	}
+	if (cal.valid)
+		joypad_stick_report(joypad, poll_dev->input, &cal);
 	input_sync(poll_dev->input);
 }
 
@@ -748,13 +1884,89 @@ static void joypad_poll(struct input_polled_dev *poll_dev)
 	struct joypad *joypad = poll_dev->private;
 
 	if (joypad->enable) {
-		joypad_adc_check(poll_dev);
+		/* buttons first: the four stick conversions take a while */
 		joypad_gpio_check(poll_dev);
+		joypad_adc_check(poll_dev);
 	}
+	/* drive the stick-ring LED animation (independent of input enable) */
+	joypad_led_tick(joypad);
 	if (poll_dev->poll_interval != joypad->poll_interval) {
 		mutex_lock(&joypad->lock);
 		poll_dev->poll_interval = joypad->poll_interval;
 		mutex_unlock(&joypad->lock);
+	}
+}
+
+/*----------------------------------------------------------------------------*/
+/*
+ * A button changed: run the poll now instead of up to poll-interval later.
+ * The poll reads the level itself, so a glitch that is gone by then does
+ * nothing, and the debounce in joypad_gpio_check() eats contact bounce.
+ * The sticks stay on the timer (they are read in the same poll).
+ * At most one such poll per ms, so a chattering or floating pin can't eat
+ * a CPU; an edge skipped here is seen by the next timed poll as before.
+ */
+static irqreturn_t joypad_button_irq(int irq, void *data)
+{
+	struct bt_gpio *gpio = data;
+	struct joypad *joypad = gpio->joypad;
+	ktime_t now = ktime_get();
+
+	if (ktime_before(now, ktime_add_us(joypad->button_kick, 1000)))
+		return IRQ_HANDLED;
+	joypad->button_kick = now;
+	mod_delayed_work(system_freezable_wq, &joypad->poll_dev->work, 0);
+	return IRQ_HANDLED;
+}
+
+static void joypad_button_irq_setup(struct device *dev, struct joypad *joypad)
+{
+	int nbtn, irq, error, count = 0;
+
+	for (nbtn = 0; nbtn < joypad->bt_gpio_count; nbtn++) {
+		struct bt_gpio *gpio = &joypad->gpios[nbtn];
+
+		gpio->joypad = joypad;
+		irq = gpio_to_irq(gpio->num);
+		if (irq <= 0) {
+			dev_warn(dev, "no interrupt for gpio %d, polled only\n",
+				 gpio->num);
+			continue;
+		}
+		/* enabled in joypad_open() */
+		irq_set_status_flags(irq, IRQ_NOAUTOEN);
+		error = devm_request_irq(dev, irq, joypad_button_irq,
+					 IRQF_TRIGGER_RISING |
+					 IRQF_TRIGGER_FALLING,
+					 gpio->label ? gpio->label : DRV_NAME,
+					 gpio);
+		if (error) {
+			irq_clear_status_flags(irq, IRQ_NOAUTOEN);
+			dev_warn(dev, "gpio %d interrupt error %d, polled only\n",
+				 gpio->num, error);
+			continue;
+		}
+		gpio->irq = irq;
+		count++;
+	}
+	dev_info(dev, "%s : %d of %d buttons interrupt driven, debounce %lld us\n",
+		 __func__, count, joypad->bt_gpio_count,
+		 ktime_to_us(joypad->button_debounce));
+}
+
+static void joypad_button_irq_enable(struct joypad *joypad, bool on)
+{
+	int nbtn;
+
+	for (nbtn = 0; nbtn < joypad->bt_gpio_count; nbtn++) {
+		struct bt_gpio *gpio = &joypad->gpios[nbtn];
+
+		if (!gpio->irq)
+			continue;
+		if (on)
+			enable_irq(gpio->irq);
+		else
+			disable_irq(gpio->irq);
 	}
 }
 
@@ -768,7 +1980,7 @@ static void joypad_open(struct input_polled_dev *poll_dev)
 		struct bt_gpio *gpio = &joypad->gpios[nbtn];
 		gpio->old_value = gpio->active_level ? 0 : 1;
 	}
-	for (nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
+	for (nbtn = 0; !joypad->no_sticks && nbtn < joypad->amux_count; nbtn++) {
 		struct bt_adc *adc = &joypad->adcs[nbtn];
 
 		adc->value = joypad_adc_read(joypad->amux, adc);
@@ -790,6 +2002,8 @@ static void joypad_open(struct input_polled_dev *poll_dev)
 	joypad->enable = true;
 	mutex_unlock(&joypad->lock);
 
+	joypad_button_irq_enable(joypad, true);
+
 	dev_info(joypad->dev, "%s : opened\n", __func__);
 }
 
@@ -797,6 +2011,13 @@ static void joypad_open(struct input_polled_dev *poll_dev)
 static void joypad_close(struct input_polled_dev *poll_dev)
 {
 	struct joypad *joypad = poll_dev->private;
+
+	/*
+	 * The input core has stopped the poll already, but a button edge may
+	 * have queued it again since: stop the edges, then the poll.
+	 */
+	joypad_button_irq_enable(joypad, false);
+	cancel_delayed_work_sync(&poll_dev->work);
 
 	/* button report disable */
 	mutex_lock(&joypad->lock);
@@ -911,29 +2132,11 @@ static int joypad_adc_setup(struct device *dev, struct joypad *joypad)
 			adc->max *= adc->scale;
 			adc->min *= adc->scale;
 		}
-		if (of_property_read_u32_index(dev->of_node,
-					       "amux-channel-mapping",
-					       nbtn, &adc->amux_ch)) {
-			adc->amux_ch = nbtn; /* fall back to default */
-		}
+		adc->amux_ch = nbtn;
 		adc->invert = false;
 
 		switch (nbtn) {
 			case 0:
-              if (joypad->turn_absr) {
-				if (joypad->invert_absrx)
-					adc->invert = true;
-				adc->report_type = ABS_RX;
-				if (device_property_read_u32(dev,
-					"abs_rx-p-tuning",
-					&adc->tuning_p))
-					adc->tuning_p = ADC_TUNING_DEFAULT;
-				if (device_property_read_u32(dev,
-					"abs_rx-n-tuning",
-					&adc->tuning_n))
-					adc->tuning_n = ADC_TUNING_DEFAULT;
-				break;
-              } else {
 				if (joypad->invert_absry)
 					adc->invert = true;
 				adc->report_type = ABS_RY;
@@ -946,22 +2149,7 @@ static int joypad_adc_setup(struct device *dev, struct joypad *joypad)
 					&adc->tuning_n))
 					adc->tuning_n = ADC_TUNING_DEFAULT;
 				break;
-              }
 			case 1:
-              if (joypad->turn_absr) {
-				if (joypad->invert_absry)
-					adc->invert = true;
-				adc->report_type = ABS_RY;
-				if (device_property_read_u32(dev,
-					"abs_ry-p-tuning",
-					&adc->tuning_p))
-					adc->tuning_p = ADC_TUNING_DEFAULT;
-				if (device_property_read_u32(dev,
-					"abs_ry-n-tuning",
-					&adc->tuning_n))
-					adc->tuning_n = ADC_TUNING_DEFAULT;
-				break;
-              } else {
 				if (joypad->invert_absrx)
 					adc->invert = true;
 				adc->report_type = ABS_RX;
@@ -974,7 +2162,6 @@ static int joypad_adc_setup(struct device *dev, struct joypad *joypad)
 					&adc->tuning_n))
 					adc->tuning_n = ADC_TUNING_DEFAULT;
 				break;
-              }
 			case 2:
 				if (joypad->invert_absy)
 					adc->invert = true;
@@ -1006,11 +2193,155 @@ static int joypad_adc_setup(struct device *dev, struct joypad *joypad)
 					__func__, nbtn);
 				return -EINVAL;
 		}
+
+		if (of_property_read_u32_index(dev->of_node,
+						"amux-channel-mapping",
+						nbtn, &adc->amux_ch))
+			adc->amux_ch = nbtn;
 	}
 	return	0;
 }
 
 /*----------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
+/*
+ * Extra buttons on pins the DT does not describe, found with the button
+ * finder in the Controllers app: odroidgo3_joypad.extra_gpios=2A5,3C1H
+ * Each entry is bank (0-3), port (A-D), pin (0-7) and an optional active
+ * level, L (default, pressed = low, pull-up) or H (pressed = high,
+ * pull-down). They become BTN_TRIGGER_HAPPY1-16 codes the DT does not use yet
+ * (the key layout has those 16, as Extra button 1-16).
+ * Bad entries are skipped with a warning, they never fail the probe.
+ */
+#define JOYPAD_MAX_EXTRA	8
+
+static char extra_gpios[64];
+module_param_string(extra_gpios, extra_gpios, sizeof(extra_gpios), 0444);
+MODULE_PARM_DESC(extra_gpios, "extra buttons, like 2A5,3C1H (bank, port, pin, L/H)");
+
+static int joypad_count_extra(void)
+{
+	const char *p;
+	int n = 1;
+
+	if (!extra_gpios[0])
+		return 0;
+	for (p = extra_gpios; *p; p++)
+		if (*p == ',')
+			n++;
+	return min(n, JOYPAD_MAX_EXTRA);
+}
+
+static int joypad_match_chip_label(struct gpio_chip *chip, void *data)
+{
+	return chip->label && !strcmp(chip->label, data);
+}
+
+/* "2A5" or "2A5L" or "2A5H": gpio number and active level, or -EINVAL */
+static int joypad_parse_extra(struct device *dev, const char *entry,
+			      bool *active_level)
+{
+	struct gpio_chip *chip;
+	char name[8];
+	int bank, port, pin, len = strlen(entry);
+
+	if (len < 3 || len > 4)
+		return -EINVAL;
+	bank = entry[0] - '0';
+	port = entry[1] - 'A';
+	pin = entry[2] - '0';
+	if (bank < 0 || bank > 3 || port < 0 || port > 3 || pin < 0 || pin > 7)
+		return -EINVAL;
+	if (len == 4 && entry[3] != 'L' && entry[3] != 'H')
+		return -EINVAL;
+	*active_level = (len == 4 && entry[3] == 'H');
+
+	snprintf(name, sizeof(name), "gpio%d", bank);
+	chip = gpiochip_find(name, joypad_match_chip_label);
+	if (!chip || port * 8 + pin >= chip->ngpio)
+		return -ENODEV;
+	return chip->base + port * 8 + pin;
+}
+
+static bool joypad_code_used(struct joypad *joypad, int count, int code)
+{
+	int i;
+
+	for (i = 0; i < count; i++)
+		if (joypad->gpios[i].report_type == EV_KEY &&
+		    joypad->gpios[i].linux_code == code)
+			return true;
+	return false;
+}
+
+/* adds the extra buttons after the DT ones, returns how many were added */
+static int joypad_extra_setup(struct device *dev, struct joypad *joypad,
+			      int count, int room)
+{
+	char list[sizeof(extra_gpios)], *rest = list, *entry;
+	int code = BTN_TRIGGER_HAPPY1, added = 0;
+
+	strlcpy(list, extra_gpios, sizeof(list));
+	while ((entry = strsep(&rest, ",")) != NULL && added < room) {
+		struct bt_gpio *gpio = &joypad->gpios[count + added];
+		bool active_level;
+		int num, i, error;
+		unsigned long pull;
+
+		entry = strim(entry);
+		if (!*entry)
+			continue;
+		num = joypad_parse_extra(dev, entry, &active_level);
+		if (num < 0) {
+			dev_warn(dev, "extra button '%s': not a pin, skipped\n",
+				 entry);
+			continue;
+		}
+		for (i = 0; i < count + added; i++)
+			if (joypad->gpios[i].num == num)
+				break;
+		if (i < count + added) {
+			dev_warn(dev, "extra button '%s': already a button, skipped\n",
+				 entry);
+			continue;
+		}
+		while (code <= BTN_TRIGGER_HAPPY16 &&
+		       joypad_code_used(joypad, count + added, code))
+			code++;
+		if (code > BTN_TRIGGER_HAPPY16) {
+			dev_warn(dev, "extra button '%s': no free code left, skipped\n",
+				 entry);
+			break;
+		}
+
+		error = devm_gpio_request_one(dev, num, GPIOF_IN, "extra-button");
+		if (error) {
+			dev_warn(dev, "extra button '%s': gpio %d busy (%d), skipped\n",
+				 entry, num, error);
+			continue;
+		}
+		/* the pin keeps its mux; only the pull follows the level */
+		pull = pinconf_to_config_packed(active_level ?
+						PIN_CONFIG_BIAS_PULL_DOWN :
+						PIN_CONFIG_BIAS_PULL_UP, 1);
+		error = pinctrl_gpio_set_config(num, pull);
+		if (error)
+			dev_warn(dev, "extra button '%s': pull not set (%d)\n",
+				 entry, error);
+
+		gpio->num = num;
+		gpio->label = "extra-button";
+		gpio->active_level = active_level;
+		gpio->report_type = EV_KEY;
+		gpio->linux_code = code;
+		dev_info(dev, "extra button '%s': gpio %d, code %d, active %s\n",
+			 entry, num, code, active_level ? "high" : "low");
+		added++;
+		code++;
+	}
+	return added;
+}
+
 static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 {
 	struct device_node *node, *pp;
@@ -1020,7 +2351,8 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 	if (!node)
 		return -ENODEV;
 
-	joypad->gpios = devm_kzalloc(dev, joypad->bt_gpio_count *
+	joypad->gpios = devm_kzalloc(dev, (joypad->bt_gpio_count +
+				joypad_count_extra()) *
 				sizeof(struct bt_gpio), GFP_KERNEL);
 
 	if (!joypad->gpios) {
@@ -1069,6 +2401,9 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 	if (nbtn == 0)
 		return -EINVAL;
 
+	joypad->bt_gpio_count = nbtn +
+		joypad_extra_setup(dev, joypad, nbtn, joypad_count_extra());
+
 	return	0;
 }
 
@@ -1084,9 +2419,10 @@ static int rumble_play_effect(struct input_dev *dev, void *data, struct ff_effec
 	else
 		boosted_level = effect->u.rumble.weak_magnitude + joypad->boost_weak;
 
-	joypad->level = (u16)CLAMP(boosted_level, 0, 0xffff);
+	boosted_level = CLAMP(boosted_level, 0, 0xffff);
+	joypad->level = (u16)(boosted_level * joypad->rumble_strength / 100);
 	
-	dev_info(joypad->dev,"joypad->level = %d",  joypad->level);
+	dev_dbg(joypad->dev, "joypad->level = %d", joypad->level);
 	schedule_work(&joypad->play_work);
 	return 0;
 }
@@ -1096,14 +2432,48 @@ static int joypad_rumble_setup(struct device *dev, struct joypad *joypad)
 	int err;
 	struct pwm_state state;
 
+	INIT_WORK(&joypad->play_work, pwm_vibrator_play_work);
+	joypad->rumble_strength = 100;
+	device_property_read_u32(dev, "andr36oid,rumble-strength",
+				 &joypad->rumble_strength);
+	if (joypad->rumble_strength > 100)
+		joypad->rumble_strength = 100;
+
+	/*
+	 * Clones with a motor on a plain GPIO (XF35H, XF40H, R36 Ultra) set
+	 * rumble-gpios; the motor starts off. Boards without it keep the PWM.
+	 */
+	joypad->rumble_gpio = devm_gpiod_get_optional(dev, "rumble",
+						      GPIOD_OUT_LOW);
+	if (IS_ERR(joypad->rumble_gpio)) {
+		err = PTR_ERR(joypad->rumble_gpio);
+		joypad->rumble_gpio = NULL;
+		if (err == -EPROBE_DEFER)
+			return err;
+		dev_err(dev, "rumble gpio error %d, trying the PWM\n", err);
+	} else if (joypad->rumble_gpio) {
+		dev_info(dev, "rumble motor on a GPIO\n");
+		joypad->rumble = true;
+		return 0;
+	}
+
+	/*
+	 * The DT says the board has no motor (EE clones, or the pin does
+	 * something else there), so games aren't told there is rumble. Such
+	 * DTs keep pwms for older kernels; a DT without pwms has no motor too.
+	 */
+	if (of_property_read_bool(dev->of_node, "andr36oid,no-rumble") ||
+	    !of_find_property(dev->of_node, "pwms", NULL)) {
+		dev_info(dev, "no rumble motor\n");
+		return 0;
+	}
+
 	joypad->pwm = devm_pwm_get(dev, "enable");
 	if (IS_ERR(joypad->pwm))
 	{
 		dev_err(dev, "rumble get error\n");
 		return -EINVAL;
 	}
-
-	INIT_WORK(&joypad->play_work, pwm_vibrator_play_work);
 
 	/* Sync up PWM state and ensure it is off. */
 	pwm_init_state(joypad->pwm, &state);
@@ -1114,7 +2484,122 @@ static int joypad_rumble_setup(struct device *dev, struct joypad *joypad)
 			err);
 		return err;
 	}
+	joypad->rumble = true;
 	dev_info(dev, "rumble setup success!\n");
+	return 0;
+}
+/*----------------------------------------------------------------------------*/
+/*
+ * Stop the LED carrier and mark the engine dead. Registered as a devm action
+ * so it runs on BOTH probe-failure (devres unwind, remove() never called) and
+ * normal unbind, before devres frees the gpio descriptors and the joypad
+ * struct the hrtimer lives in. Without it, a probe failure after the carrier
+ * is armed (e.g. input_ff_create_memless() ENOMEM on a LED+rumble board such
+ * as the R36 Ultra) would leave the timer firing on freed memory.
+ */
+static void joypad_led_engine_stop(void *data)
+{
+	struct joypad *joypad = data;
+
+	mutex_lock(&joypad->lock);
+	joypad->led_dead = true;
+	joypad->led_running = false;
+	mutex_unlock(&joypad->lock);
+	hrtimer_cancel(&joypad->led_timer);
+	joypad_led_set_gpios(joypad, 0);
+}
+
+static int joypad_leds_setup(struct device *dev, struct joypad *joypad)
+{
+	static const char *const con[3]   = { "led-red", "led-green", "led-blue" };
+	static const char *const con_r[3] = { "led-red-right", "led-green-right",
+					      "led-blue-right" };
+	const char *mode_str = NULL;
+	int c, present = 0, present_r = 0;
+	u32 v;
+
+	spin_lock_init(&joypad->led_lock);
+	hrtimer_init(&joypad->led_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	joypad->led_timer.function = joypad_led_carrier;
+	joypad->led_substep =
+		ns_to_ktime(NSEC_PER_SEC / (LED_REFRESH_HZ * LED_PWM_STEPS));
+
+	for (c = 0; c < 3; c++) {
+		joypad->led_gpio[0][c] =
+			devm_gpiod_get_optional(dev, con[c], GPIOD_OUT_LOW);
+		if (IS_ERR(joypad->led_gpio[0][c])) {
+			int err = PTR_ERR(joypad->led_gpio[0][c]);
+
+			joypad->led_gpio[0][c] = NULL;
+			if (err == -EPROBE_DEFER)
+				return err;
+			dev_err(dev, "stick LED %s error %d\n", con[c], err);
+		} else if (joypad->led_gpio[0][c]) {
+			present++;
+		}
+	}
+	if (present == 0)
+		return 0;	/* no stick RGB on this board; engine dormant */
+	if (present != 3)
+		dev_warn(dev, "stick LED: only %d/3 shared channels wired\n",
+			 present);
+
+	for (c = 0; c < 3; c++) {
+		joypad->led_gpio[1][c] =
+			devm_gpiod_get_optional(dev, con_r[c], GPIOD_OUT_LOW);
+		if (IS_ERR(joypad->led_gpio[1][c]))
+			joypad->led_gpio[1][c] = NULL;
+		else if (joypad->led_gpio[1][c])
+			present_r++;
+	}
+	joypad->led_dual = (present_r == 3);
+	if (!joypad->led_dual)
+		for (c = 0; c < 3; c++)
+			joypad->led_gpio[1][c] = NULL;
+
+	joypad->led_have = true;
+
+	/*
+	 * Register teardown now that the LED GPIOs are claimed: devres unwinds
+	 * LIFO, so joypad_led_engine_stop() (cancels the hrtimer and drives the
+	 * lines low) runs before the GPIOs are released. Still before anything
+	 * starts the carrier (joypad_led_tick runs later in probe).
+	 */
+	if (devm_add_action_or_reset(dev, joypad_led_engine_stop, joypad))
+		return -ENOMEM;
+
+	/* defaults; userspace writes the real system-accent colour at boot */
+	joypad->led_brightness = 160;
+	joypad->led_speed = 40;
+	joypad->led_mode = LED_MODE_STATIC;
+	joypad->led_color[0][0] = 0xff;		/* accent orange fallback */
+	joypad->led_color[0][1] = 0x7a;
+	joypad->led_color[0][2] = 0x00;
+	if (!device_property_read_u32(dev, "andr36oid,led-default-color", &v)) {
+		joypad->led_color[0][0] = (v >> 16) & 0xff;
+		joypad->led_color[0][1] = (v >> 8) & 0xff;
+		joypad->led_color[0][2] = v & 0xff;
+	}
+	memcpy(joypad->led_color[1], joypad->led_color[0], 3);
+	if (!device_property_read_u32(dev, "andr36oid,led-default-brightness",
+				      &v))
+		joypad->led_brightness = (u8)min_t(u32, v, 255);
+	if (!device_property_read_u32(dev, "andr36oid,led-default-speed", &v))
+		joypad->led_speed = (u8)clamp_t(u32, v, 1, 100);
+	if (!device_property_read_string(dev, "andr36oid,led-default-mode",
+					 &mode_str)) {
+		int i;
+
+		for (i = 0; i < LED_MODE_COUNT; i++)
+			if (!strcmp(mode_str, led_mode_name[i])) {
+				joypad->led_mode = i;
+				break;
+			}
+	}
+
+	dev_info(dev, "stick RGB LEDs ready (%s)\n",
+		 joypad->led_dual ? "dual ring" : "shared");
+	joypad_led_tick(joypad);
 	return 0;
 }
 static int joypad_input_setup(struct device *dev, struct joypad *joypad)
@@ -1152,8 +2637,9 @@ static int joypad_input_setup(struct device *dev, struct joypad *joypad)
 	input->id.version = (u16)joypad_revision;
 
 	/* IIO ADC key setup (0 mv ~ 1800 mv) * adc->scale */
-	__set_bit(EV_ABS, input->evbit);
-	for(nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
+	if (!joypad->no_sticks)
+		__set_bit(EV_ABS, input->evbit);
+	for (nbtn = 0; !joypad->no_sticks && nbtn < joypad->amux_count; nbtn++) {
 		struct bt_adc *adc = &joypad->adcs[nbtn];
 		input_set_abs_params(input, adc->report_type,
 				adc->min, adc->max,
@@ -1176,12 +2662,15 @@ static int joypad_input_setup(struct device *dev, struct joypad *joypad)
 	joypad->boost_weak = boost_weak;
 	joypad->boost_strong = boost_strong;
 	dev_info(dev, "Boost = %d, %d",boost_weak, boost_strong);
-	input_set_capability(input, EV_FF, FF_RUMBLE);
-	error = input_ff_create_memless(input, joypad, rumble_play_effect);
-	if (error) {
-		dev_err(dev, "unable to register rumble, err=%d\n",
-			error);
-		return error;
+	if (joypad->rumble) {
+		input_set_capability(input, EV_FF, FF_RUMBLE);
+		error = input_ff_create_memless(input, joypad,
+						rumble_play_effect);
+		if (error) {
+			dev_err(dev, "unable to register rumble, err=%d\n",
+				error);
+			return error;
+		}
 	}
 	
 
@@ -1197,6 +2686,10 @@ static int joypad_input_setup(struct device *dev, struct joypad *joypad)
 		__set_bit(EV_REP, input->evbit);
 
 	joypad->dev = dev;
+	joypad->poll_dev = poll_dev;
+
+	if (joypad->button_irq)
+		joypad_button_irq_setup(dev, joypad);
 
 	error = input_register_polled_device(poll_dev);
 	if (error) {
@@ -1255,9 +2748,26 @@ static int joypad_dt_parse(struct device *dev, struct joypad *joypad)
 
 	device_property_read_u32(dev, "amux-count",
 				&joypad->amux_count);
+	/*
+	 * Clamp a malformed DTB value before it sizes the adcs allocation.
+	 * The per-channel parse only handles channels 0..3 (ABS_X/Y/RX/RY),
+	 * so 4 is the hard maximum.
+	 */
+	if (joypad->amux_count < 1 || joypad->amux_count > 4)
+		joypad->amux_count = 1;
 
 	device_property_read_u32(dev, "poll-interval",
 				&joypad->poll_interval);
+
+	/* optional: button edges start a poll at once (sticks stay polled) */
+	joypad->button_irq = device_property_present(dev, "button-irq");
+	if (joypad->button_irq) {
+		u32 debounce_ms = 5;
+
+		device_property_read_u32(dev, "button-debounce-ms",
+					 &debounce_ms);
+		joypad->button_debounce = ms_to_ktime(debounce_ms);
+	}
 
 	joypad->auto_repeat = device_property_present(dev, "autorepeat");
 
@@ -1266,9 +2776,15 @@ static int joypad_dt_parse(struct device *dev, struct joypad *joypad)
 	joypad->invert_absy = device_property_present(dev, "invert-absy");
 	joypad->invert_absrx = device_property_present(dev, "invert-absrx");
 	joypad->invert_absry = device_property_present(dev, "invert-absry");
-	joypad->turn_absr = device_property_present(dev, "turn-absr");
-	dev_info(dev, "%s : invert-absx = %d, inveret-absy = %d, invert-absrx = %d, inveret-absry = %d, turn-absr = %d\n",
-		__func__, joypad->invert_absx, joypad->invert_absy, joypad->invert_absrx, joypad->invert_absry, joypad->turn_absr);
+	/*
+	 * Boards without sticks still have amux-count and the ADC wiring (older
+	 * kernels need them), so this switches the sticks off instead
+	 */
+	joypad->no_sticks = device_property_present(dev, "andr36oid,no-sticks");
+	if (joypad->no_sticks)
+		dev_info(dev, "no sticks on this board, not reporting any\n");
+	dev_info(dev, "%s : invert-absx = %d, inveret-absy = %d, invert-absrx = %d, inveret-absry = %d\n",
+		__func__, joypad->invert_absx, joypad->invert_absy, joypad->invert_absrx, joypad->invert_absry);
 
 	joypad->bt_gpio_count = device_get_child_node_count(dev);
 
@@ -1305,6 +2821,17 @@ static int __maybe_unused joypad_suspend(struct device *dev)
 	if (joypad->level)
 		pwm_vibrator_stop(joypad);
 
+	/* blank the stick LEDs and stop the carrier while suspended */
+	if (joypad->led_have) {
+		mutex_lock(&joypad->lock);
+		if (joypad->led_running) {
+			joypad->led_running = false;
+			hrtimer_cancel(&joypad->led_timer);
+			joypad_led_set_gpios(joypad, 0);
+		}
+		mutex_unlock(&joypad->lock);
+	}
+
 	return 0;
 }
 
@@ -1315,6 +2842,10 @@ static int __maybe_unused joypad_resume(struct device *dev)
 
 	if (joypad->level)
 		pwm_vibrator_start(joypad);
+
+	/* restore the LED mode (re-arms the carrier if needed) */
+	if (joypad->led_have)
+		joypad_led_tick(joypad);
 
 	return 0;
 }
@@ -1342,12 +2873,30 @@ static int joypad_probe(struct platform_device *pdev)
 	}
 
 	mutex_init(&joypad->lock);
+	joypad->cal.deadzone = STICK_DEADZONE_DEFAULT;
+	joypad->stick_sens[0] = STICK_SENS_DEFAULT;
+	joypad->stick_sens[1] = STICK_SENS_DEFAULT;
 	platform_set_drvdata(pdev, joypad);
 
-	error = sysfs_create_group(&pdev->dev.kobj, &joypad_attr_group);
+	/* devm, so a deferred probe can add the group again on the retry */
+	error = devm_device_add_group(dev, &joypad_attr_group);
 	if (error) {
 		dev_err(dev, "create sysfs group fail, error: %d\n",
 			error);
+		return error;
+	}
+
+	/* rumble first: the input device only offers FF with a motor */
+	error = joypad_rumble_setup(dev, joypad);
+	if (error) {
+		dev_err(dev, "rumble setup failed!(err = %d)\n", error);
+		return error;
+	}
+
+	/* stick-ring RGB LEDs (no-op on boards without the DT led-*-gpios) */
+	error = joypad_leds_setup(dev, joypad);
+	if (error) {
+		dev_err(dev, "stick LED setup failed!(err = %d)\n", error);
 		return error;
 	}
 
@@ -1357,15 +2906,31 @@ static int joypad_probe(struct platform_device *pdev)
 		dev_err(dev, "input setup failed!(err = %d)\n", error);
 		return error;
 	}
-	
-	/* rumble setup */
-	error = joypad_rumble_setup(dev, joypad);
-	if (error) {
-		dev_err(dev, "rumble setup failed!(err = %d)\n", error);
-		return error;
-	}
 
 	dev_info(dev, "%s : probe success\n", __func__);
+	return 0;
+}
+
+/*----------------------------------------------------------------------------*/
+static int joypad_remove(struct platform_device *pdev)
+{
+	struct joypad *joypad = platform_get_drvdata(pdev);
+
+	/* stop the LED carrier and blank the rings before we go */
+	if (joypad && joypad->led_have) {
+		/*
+		 * Mark the engine dead under ->lock so a poll tick that is about
+		 * to re-arm the carrier (joypad_led_tick start branch, same
+		 * lock) sees it and backs off. Otherwise it could hrtimer_start()
+		 * again after devres frees the gpio descriptors and the joypad.
+		 */
+		mutex_lock(&joypad->lock);
+		joypad->led_dead = true;
+		joypad->led_running = false;
+		mutex_unlock(&joypad->lock);
+		hrtimer_cancel(&joypad->led_timer);
+		joypad_led_set_gpios(joypad, 0);
+	}
 	return 0;
 }
 
@@ -1380,6 +2945,7 @@ MODULE_DEVICE_TABLE(of, joypad_of_match);
 /*----------------------------------------------------------------------------*/
 static struct platform_driver joypad_driver = {
 	.probe = joypad_probe,
+	.remove = joypad_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.pm = &joypad_pm_ops,
