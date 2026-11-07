@@ -345,3 +345,10 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-xf35h.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-xf40h.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-y02.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36splus-android.dtb
+
+# Additional product consoles and experimental Ultra X
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r45h-android.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r46h-android.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50s-android.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-g350-android.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-grc802.dtb
