@@ -12,6 +12,14 @@
 #include "rk3326.dtsi"
 #include "rk3326-linux.dtsi"
 
+/* Match dArkOSen's legacy combo PHY driver for DSI, LVDS and RGB boards. */
+&video_phy {
+	compatible = "rockchip,px30-video-phy";
+	clock-names = "ref", "pclk_phy", "pclk_host";
+	reset-names = "rst";
+	#clock-cells = <0>;
+};
+
 / {
 	model = "Game Console R35S/R36S";
 	compatible = "rockchip,rk3326-odroidgo3-linux", "rockchip,rk3326";
