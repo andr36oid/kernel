@@ -110,7 +110,6 @@
 		REG_SET_MASK(vop, name, 0, vop->data->intr->name, \
 			     mask, v, false)
 
-
 #define VOP_REG_SET(vop, group, name, v) \
 		    vop_reg_set(vop, &vop->data->group->name, 0, ~0, v, #name)
 
@@ -205,6 +204,10 @@ struct vop_win {
 	struct vop *vop;
 	struct vop_plane_state state;
 
+	struct drm_property *legacy_zpos_prop;
+	struct drm_property *legacy_alpha_prop;
+	struct drm_property *legacy_blend_prop;
+	struct drm_property *legacy_area_prop;
 	struct drm_property *input_width_prop;
 	struct drm_property *input_height_prop;
 	struct drm_property *output_width_prop;
@@ -2352,6 +2355,20 @@ static int vop_atomic_plane_set_property(struct drm_plane *plane,
 	struct vop_win *win = to_vop_win(plane);
 	struct vop_plane_state *plane_state = to_vop_plane_state(state);
 
+	if (property == win->legacy_zpos_prop) {
+		state->zpos = val;
+		return 0;
+	}
+	if (property == win->legacy_alpha_prop) {
+		/* Legacy alpha is 8-bit; the standard DRM state is 16-bit. */
+		state->alpha = val * 257;
+		return 0;
+	}
+	if (property == win->legacy_blend_prop) {
+		/* Old BLEND_MODE is a Boolean premultiplied-alpha selector. */
+		state->pixel_blend_mode = val ? DRM_MODE_BLEND_PREMULTI : DRM_MODE_BLEND_COVERAGE;
+		return 0;
+	}
 	if (property == private->eotf_prop) {
 		plane_state->eotf = val;
 		return 0;
@@ -2387,6 +2404,22 @@ static int vop_atomic_plane_get_property(struct drm_plane *plane,
 	struct vop_win *win = to_vop_win(plane);
 	struct rockchip_drm_private *private = plane->dev->dev_private;
 
+	if (property == win->legacy_zpos_prop) {
+		*val = state->zpos;
+		return 0;
+	}
+	if (property == win->legacy_alpha_prop) {
+		*val = state->alpha / 257;
+		return 0;
+	}
+	if (property == win->legacy_blend_prop) {
+		*val = state->pixel_blend_mode == DRM_MODE_BLEND_PREMULTI;
+		return 0;
+	}
+	if (property == win->legacy_area_prop) {
+		*val = win->area_id;
+		return 0;
+	}
 	if (property == private->eotf_prop) {
 		*val = plane_state->eotf;
 		return 0;
@@ -4539,6 +4572,27 @@ static int vop_plane_init(struct vop *vop, struct vop_win *win,
 	drm_plane_create_zpos_property(&win->base, win->win_id, 0, vop->num_wins - 1);
 	vop_plane_create_name_property(vop, win);
 
+	if (IS_ENABLED(CONFIG_ROCKCHIP_DRM_ANDROID_LEGACY)) {
+		win->legacy_zpos_prop = drm_property_create_range(vop->drm_dev,
+			DRM_MODE_PROP_ATOMIC, "ZPOS", 0, vop->num_wins - 1);
+		win->legacy_blend_prop = drm_property_create_range(vop->drm_dev,
+			DRM_MODE_PROP_ATOMIC, "BLEND_MODE", 0, 1);
+		win->legacy_area_prop = drm_property_create_range(vop->drm_dev,
+			DRM_MODE_PROP_IMMUTABLE, "SHARE_FLAGS", 0, UINT_MAX);
+		if (!win->legacy_zpos_prop || !win->legacy_blend_prop || !win->legacy_area_prop)
+			return -ENOMEM;
+		drm_object_attach_property(&win->base.base, win->legacy_zpos_prop, win->win_id);
+		drm_object_attach_property(&win->base.base, win->legacy_blend_prop, 1);
+		drm_object_attach_property(&win->base.base, win->legacy_area_prop, win->area_id);
+		if (VOP_WIN_SUPPORT(vop, win, global_alpha_val)) {
+			win->legacy_alpha_prop = drm_property_create_range(vop->drm_dev,
+				DRM_MODE_PROP_ATOMIC, "GLOBAL_ALPHA", 0, 255);
+			if (!win->legacy_alpha_prop)
+				return -ENOMEM;
+			drm_object_attach_property(&win->base.base, win->legacy_alpha_prop, 255);
+		}
+	}
+
 
 	win->input_width_prop = drm_property_create_range(vop->drm_dev, DRM_MODE_PROP_IMMUTABLE,
 							  "INPUT_WIDTH", 0, vop_data->max_input.width);
@@ -5084,7 +5138,6 @@ static int vop_bind(struct device *dev, struct device *master, void *data)
 		return ret;
 
 	pm_runtime_enable(&pdev->dev);
-
 
 	mcu = of_get_child_by_name(dev->of_node, "mcu-timing");
 	if (!mcu) {

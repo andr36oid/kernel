@@ -159,3 +159,10 @@ config ROCKCHIP_DW_HDCP2
 source "drivers/gpu/drm/rockchip/rk618/Kconfig"
 
 endif
+
+config ROCKCHIP_DRM_ANDROID_LEGACY
+	bool "Android 4.19 Rockchip HWC plane-property compatibility"
+	depends on DRM_ROCKCHIP
+	help
+	  Expose ZPOS, GLOBAL_ALPHA, BLEND_MODE and SHARE_FLAGS alongside
+	  standard DRM plane properties for the Android 11 Rockchip HWC.
