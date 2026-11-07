@@ -1784,7 +1784,9 @@ static int rockchip_drm_bind(struct device *dev)
 	rockchip_drm_mode_config_init(drm_dev);
 	rockchip_drm_create_properties(drm_dev);
 	/* Try to bind all sub drivers. */
+	dev_dbg(dev, "component_bind_all begin\n");
 	ret = component_bind_all(dev, drm_dev);
+	dev_dbg(dev, "component_bind_all end ret=%d\n", ret);
 	if (ret)
 		goto err_mode_config_cleanup;
 
@@ -1805,7 +1807,9 @@ static int rockchip_drm_bind(struct device *dev)
 	/* init kms poll for handling hpd */
 	drm_kms_helper_poll_init(drm_dev);
 
+	dev_dbg(dev, "iommu_attach begin\n");
 	ret = rockchip_drm_init_iommu(drm_dev);
+	dev_dbg(dev, "iommu_attach end ret=%d\n", ret);
 	if (ret)
 		goto err_unbind_all;
 
@@ -1814,15 +1818,21 @@ static int rockchip_drm_bind(struct device *dev)
 	if (ret)
 		DRM_DEBUG_KMS("No reserved memory region assign to drm\n");
 
+	dev_dbg(dev, "show_logo begin\n");
 	rockchip_drm_show_logo(drm_dev);
+	dev_dbg(dev, "show_logo end\n");
 
+	dev_dbg(dev, "fbdev_init begin\n");
 	ret = rockchip_drm_fbdev_init(drm_dev);
+	dev_dbg(dev, "fbdev_init end ret=%d\n", ret);
 	if (ret)
 		goto err_iommu_cleanup;
 
 	drm_dev->mode_config.allow_fb_modifiers = true;
 
+	dev_dbg(dev, "drm_register begin\n");
 	ret = drm_dev_register(drm_dev, 0);
+	dev_dbg(dev, "drm_register end ret=%d\n", ret);
 	if (ret)
 		goto err_kms_helper_poll_fini;
 
@@ -2431,3 +2441,6 @@ module_exit(rockchip_drm_fini);
 MODULE_AUTHOR("Mark Yao <mark.yao@rock-chips.com>");
 MODULE_DESCRIPTION("ROCKCHIP DRM Driver");
 MODULE_LICENSE("GPL v2");
+#ifdef CONFIG_ROCKCHIP_DRM_DEBUG
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif

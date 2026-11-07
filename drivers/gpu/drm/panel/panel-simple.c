@@ -557,7 +557,9 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	if (p->prepared)
 		return 0;
 
+	dev_dbg(panel->dev, "panel supply enable begin\n");
 	err = panel_simple_regulator_enable(p);
+	dev_dbg(panel->dev, "panel supply enable end ret=%d\n", err);
 	if (err < 0) {
 		dev_err(panel->dev, "failed to enable supply: %d\n", err);
 		return err;
@@ -608,8 +610,11 @@ static int panel_simple_prepare(struct drm_panel *panel)
 				return -EINVAL;
 			}
 		} else {
-			if (p->dsi)
+			if (p->dsi) {
+				dev_dbg(panel->dev, "panel DSI init sequence begin\n");
 				panel_simple_xfer_dsi_cmd_seq(p, p->desc->init_seq);
+				dev_dbg(panel->dev, "panel DSI init sequence end\n");
+			}
 		}
 	}
 

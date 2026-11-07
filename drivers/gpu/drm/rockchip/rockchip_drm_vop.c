@@ -5033,6 +5033,8 @@ static int vop_bind(struct device *dev, struct device *master, void *data)
 	bool dual_channel_swap = false;
 	struct device_node *mcu = NULL;
 
+	dev_dbg(dev, "vop_bind begin\n");
+
 	vop_data = of_device_get_match_data(dev);
 	if (!vop_data)
 		return -ENODEV;

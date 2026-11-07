@@ -1025,6 +1025,7 @@ static int dw_mipi_dsi_rockchip_bind(struct device *dev,
 	struct device *second;
 	int ret;
 
+	dev_dbg(dev, "DSI bind begin\n");
 	second = dw_mipi_dsi_rockchip_find_second(dsi);
 	if (IS_ERR(second))
 		return PTR_ERR(second);

@@ -269,3 +269,6 @@
 	spk-mute-delay-ms = <500>;
 	rockchip,force-spk-hp;
 };
+
+/* Display nodes are available, but their drivers are manual-load modules. */
+#include "andr36oid-gr36-display-modules.dtsi"
