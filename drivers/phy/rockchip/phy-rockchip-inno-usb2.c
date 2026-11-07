@@ -282,6 +282,7 @@ struct rockchip_usb2phy_port {
 	bool		utmi_avalid;
 	bool		vbus_attached;
 	bool		vbus_always_on;
+	bool		no_vbus_en_extcon;
 	bool		vbus_enabled;
 	bool		bypass_uart_en;
 	bool		host_disconnect;
@@ -347,6 +348,10 @@ struct rockchip_usb2phy {
 	u8			dcd_retries;
 	u8			primary_retries;
 	unsigned int		phy_sus_cfg;
+	bool			host_while_charging;
+	bool			psy_registered;
+	struct notifier_block	psy_nb;
+	struct work_struct	charger_work;
 	bool			edev_self;
 	int			irq;
 	struct extcon_dev	*edev;
@@ -1034,7 +1039,8 @@ static int rockchip_usb2phy_set_mode(struct phy *phy,
 	case PHY_MODE_USB_DEVICE:
 		/* Disable VBUS supply */
 		rockchip_set_vbus_power(rport, false);
-		extcon_set_state_sync(rphy->edev, EXTCON_USB_VBUS_EN, false);
+		if (!rport->no_vbus_en_extcon)
+			extcon_set_state_sync(rphy->edev, EXTCON_USB_VBUS_EN, false);
 		/* For vbus always on, set EXTCON_USB to true. */
 		if (rport->vbus_always_on)
 			extcon_set_state(rphy->edev, EXTCON_USB, true);
@@ -1050,7 +1056,8 @@ static int rockchip_usb2phy_set_mode(struct phy *phy,
 			return ret;
 		}
 
-		extcon_set_state_sync(rphy->edev, EXTCON_USB_VBUS_EN, true);
+		if (!rport->no_vbus_en_extcon)
+			extcon_set_state_sync(rphy->edev, EXTCON_USB_VBUS_EN, true);
 		extcon_set_state(rphy->edev, EXTCON_USB_HOST, true);
 		/* For vbus always on, deinit EXTCON_USB to false. */
 		if (rport->vbus_always_on)
@@ -1083,6 +1090,124 @@ static const struct phy_ops rockchip_usb2phy_ops = {
 	.set_mode	= rockchip_usb2phy_set_mode,
 	.owner		= THIS_MODULE,
 };
+
+/*
+ * Force the otg port role through the grf iddig override, or hand it back
+ * to the id pin for USB_DR_MODE_OTG. The caller holds rport->mutex.
+ */
+static void rockchip_usb2phy_apply_otg_mode(struct rockchip_usb2phy *rphy,
+					    struct rockchip_usb2phy_port *rport,
+					    enum usb_dr_mode new_dr_mode)
+{
+	struct regmap *base = get_reg_base(rphy);
+
+	rport->mode = new_dr_mode;
+
+	switch (rport->mode) {
+	case USB_DR_MODE_HOST:
+		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_HOST, 0);
+		property_enable(base, &rport->port_cfg->iddig_output, false);
+		property_enable(base, &rport->port_cfg->iddig_en, true);
+		break;
+	case USB_DR_MODE_PERIPHERAL:
+		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_DEVICE, 0);
+		property_enable(base, &rport->port_cfg->iddig_output, true);
+		property_enable(base, &rport->port_cfg->iddig_en, true);
+		break;
+	case USB_DR_MODE_OTG:
+		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_OTG, 0);
+		property_enable(base, &rport->port_cfg->iddig_output, false);
+		property_enable(base, &rport->port_cfg->iddig_en, false);
+		break;
+	default:
+		break;
+	}
+}
+
+#if IS_REACHABLE(CONFIG_POWER_SUPPLY)
+static int rockchip_usb2phy_psy_online(struct device *dev, void *data)
+{
+	struct power_supply *psy = dev_get_drvdata(dev);
+	union power_supply_propval val = { 0, };
+
+	if (!psy || psy->desc->type == POWER_SUPPLY_TYPE_BATTERY)
+		return 0;
+	if (power_supply_get_property(psy, POWER_SUPPLY_PROP_ONLINE, &val))
+		return 0;
+
+	return val.intval > 0;
+}
+
+/* True when any charger (not a battery) reports that it is online. */
+static bool rockchip_usb2phy_charger_online(void)
+{
+	return class_for_each_device(power_supply_class, NULL, NULL,
+				     rockchip_usb2phy_psy_online) > 0;
+}
+
+static struct rockchip_usb2phy_port *
+rockchip_usb2phy_get_otg_port(struct rockchip_usb2phy *rphy)
+{
+	unsigned int index;
+
+	for (index = 0; index < rphy->phy_cfg->num_ports; index++) {
+		if (rphy->ports[index].phy &&
+		    rphy->ports[index].port_id == USB2PHY_PORT_OTG)
+			return &rphy->ports[index];
+	}
+
+	return NULL;
+}
+
+/*
+ * On boards with rockchip,host-while-charging the otg port's VBUS is always
+ * driven by the board, so a computer on the otg port while a charger feeds
+ * the other port puts two supplies on one line. As soon as a charger comes
+ * online, a port that is not a host is switched back to host.
+ */
+static void rockchip_usb2phy_charger_work(struct work_struct *work)
+{
+	struct rockchip_usb2phy *rphy =
+		container_of(work, struct rockchip_usb2phy, charger_work);
+	struct rockchip_usb2phy_port *rport = rockchip_usb2phy_get_otg_port(rphy);
+	bool switched = false;
+
+	if (!rport)
+		return;
+
+	mutex_lock(&rport->mutex);
+	if (rport->mode != USB_DR_MODE_HOST &&
+	    rport->mode != USB_DR_MODE_UNKNOWN &&
+	    rockchip_usb2phy_charger_online()) {
+		rockchip_usb2phy_apply_otg_mode(rphy, rport, USB_DR_MODE_HOST);
+		switched = true;
+	}
+	mutex_unlock(&rport->mutex);
+
+	if (switched) {
+		dev_warn(rphy->dev,
+			 "charger plugged in, otg port switched back to host\n");
+		sysfs_notify(&rphy->dev->kobj, NULL, "otg_mode");
+	}
+}
+
+static int rockchip_usb2phy_psy_notify(struct notifier_block *nb,
+				       unsigned long event, void *data)
+{
+	struct rockchip_usb2phy *rphy =
+		container_of(nb, struct rockchip_usb2phy, psy_nb);
+	struct power_supply *psy = data;
+
+	if (event == PSY_EVENT_PROP_CHANGED && psy &&
+	    psy->desc->type != POWER_SUPPLY_TYPE_BATTERY)
+		schedule_work(&rphy->charger_work);
+
+	return NOTIFY_OK;
+}
+
+#else
+static bool rockchip_usb2phy_charger_online(void) { return false; }
+#endif
 
 /* Show & store the current value of otg mode for otg port */
 static ssize_t otg_mode_show(struct device *device,
@@ -1127,7 +1252,6 @@ static ssize_t otg_mode_store(struct device *device,
 {
 	struct rockchip_usb2phy *rphy = dev_get_drvdata(device);
 	struct rockchip_usb2phy_port *rport = NULL;
-	struct regmap *base = get_reg_base(rphy);
 	enum usb_dr_mode new_dr_mode;
 	unsigned int index;
 	int rc = count;
@@ -1168,27 +1292,12 @@ static ssize_t otg_mode_store(struct device *device,
 		goto err1;
 	}
 
-	rport->mode = new_dr_mode;
-
-	switch (rport->mode) {
-	case USB_DR_MODE_HOST:
-		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_HOST, 0);
-		property_enable(base, &rport->port_cfg->iddig_output, false);
-		property_enable(base, &rport->port_cfg->iddig_en, true);
-		break;
-	case USB_DR_MODE_PERIPHERAL:
-		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_DEVICE, 0);
-		property_enable(base, &rport->port_cfg->iddig_output, true);
-		property_enable(base, &rport->port_cfg->iddig_en, true);
-		break;
-	case USB_DR_MODE_OTG:
-		rockchip_usb2phy_set_mode(rport->phy, PHY_MODE_USB_OTG, 0);
-		property_enable(base, &rport->port_cfg->iddig_output, false);
-		property_enable(base, &rport->port_cfg->iddig_en, false);
-		break;
-	default:
-		break;
+	if (rphy->host_while_charging && new_dr_mode != USB_DR_MODE_HOST &&
+	    rockchip_usb2phy_charger_online()) {
+		rc = -EBUSY;
+		goto err1;
 	}
+	rockchip_usb2phy_apply_otg_mode(rphy, rport, new_dr_mode);
 
 err1:
 	mutex_unlock(&rport->mutex);
@@ -1820,10 +1929,12 @@ static irqreturn_t rockchip_usb2phy_id_irq(int irq, void *data)
 	}
 
 	extcon_set_state(rphy->edev, EXTCON_USB_HOST, cable_vbus_state);
-	extcon_set_state(rphy->edev, EXTCON_USB_VBUS_EN, cable_vbus_state);
+	if (!rport->no_vbus_en_extcon)
+		extcon_set_state(rphy->edev, EXTCON_USB_VBUS_EN, cable_vbus_state);
 
 	extcon_sync(rphy->edev, EXTCON_USB_HOST);
-	extcon_sync(rphy->edev, EXTCON_USB_VBUS_EN);
+	if (!rport->no_vbus_en_extcon)
+		extcon_sync(rphy->edev, EXTCON_USB_VBUS_EN);
 
 	rockchip_set_vbus_power(rport, cable_vbus_state);
 
@@ -2145,6 +2256,7 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 {
 	int ret;
 	int iddig;
+	const char *default_mode;
 	struct regmap *base = get_reg_base(rphy);
 
 	rport->port_id = USB2PHY_PORT_OTG;
@@ -2162,6 +2274,10 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 		of_property_read_bool(child_np, "rockchip,bypass-uart");
 	rport->vbus_always_on =
 		of_property_read_bool(child_np, "rockchip,vbus-always-on");
+	rport->no_vbus_en_extcon =
+		of_property_read_bool(child_np, "rockchip,no-vbus-en-extcon");
+	rphy->host_while_charging =
+		of_property_read_bool(child_np, "rockchip,host-while-charging");
 	rport->utmi_avalid =
 		of_property_read_bool(child_np, "rockchip,utmi-avalid");
 	rport->dis_u2_susphy =
@@ -2207,7 +2323,8 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 		/* Enable VBUS supply for otg port */
 		extcon_set_state(rphy->edev, EXTCON_USB, false);
 		extcon_set_state(rphy->edev, EXTCON_USB_HOST, true);
-		extcon_set_state(rphy->edev, EXTCON_USB_VBUS_EN, true);
+		if (!rport->no_vbus_en_extcon)
+			extcon_set_state(rphy->edev, EXTCON_USB_VBUS_EN, true);
 		ret = rockchip_set_vbus_power(rport, true);
 		if (ret)
 			return ret;
@@ -2217,6 +2334,30 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 	if (ret) {
 		dev_err(rphy->dev, "failed to init irq for otg port\n");
 		return ret;
+	}
+
+	/*
+	 * An otg controller may start in a forced role, e.g. host on boards
+	 * whose id pin does not follow the cable. The role can be changed
+	 * later through the "otg_mode" attribute.
+	 */
+	if (rport->mode == USB_DR_MODE_OTG &&
+	    !of_property_read_string(child_np, "rockchip,default-otg-mode",
+				     &default_mode)) {
+		enum usb_dr_mode forced = USB_DR_MODE_UNKNOWN;
+
+		if (!strcmp(default_mode, "host"))
+			forced = USB_DR_MODE_HOST;
+		else if (!strcmp(default_mode, "peripheral"))
+			forced = USB_DR_MODE_PERIPHERAL;
+
+		if (forced != USB_DR_MODE_UNKNOWN) {
+			mutex_lock(&rport->mutex);
+			rockchip_usb2phy_apply_otg_mode(rphy, rport, forced);
+			mutex_unlock(&rport->mutex);
+			dev_info(rphy->dev, "otg port forced to %s\n",
+				 default_mode);
+		}
 	}
 
 	if (IS_REACHABLE(CONFIG_TYPEC) &&
@@ -2395,7 +2536,6 @@ static int rockchip_usb2phy_probe(struct platform_device *pdev)
 	pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
 
-
 	rphy->phy_reset = devm_reset_control_get_optional(dev, "phy");
 	if (IS_ERR(rphy->phy_reset))
 		return PTR_ERR(rphy->phy_reset);
@@ -2500,6 +2640,20 @@ next_child:
 	else
 		device_init_wakeup(rphy->dev, false);
 
+#if IS_REACHABLE(CONFIG_POWER_SUPPLY)
+	if (rphy->host_while_charging) {
+		INIT_WORK(&rphy->charger_work, rockchip_usb2phy_charger_work);
+		rphy->psy_nb.notifier_call = rockchip_usb2phy_psy_notify;
+		ret = power_supply_reg_notifier(&rphy->psy_nb);
+		if (ret) {
+			sysfs_remove_group(&dev->kobj, &usb2_phy_attr_group);
+			goto put_child;
+		}
+		rphy->psy_registered = true;
+		schedule_work(&rphy->charger_work);
+	}
+#endif
+
 	return 0;
 
 put_child:
@@ -2526,6 +2680,13 @@ static int rockchip_usb2phy_remove(struct platform_device *pdev)
 	struct rockchip_usb2phy *rphy = platform_get_drvdata(pdev);
 	struct rockchip_usb2phy_port *rport;
 	unsigned int index;
+
+#if IS_REACHABLE(CONFIG_POWER_SUPPLY)
+	if (rphy->psy_registered) {
+		power_supply_unreg_notifier(&rphy->psy_nb);
+		cancel_work_sync(&rphy->charger_work);
+	}
+#endif
 
 	for (index = 0; index < rphy->phy_cfg->num_ports; index++) {
 		rport = &rphy->ports[index];
@@ -3275,7 +3436,8 @@ static int rockchip_usb2phy_pm_resume(struct device *dev)
 				extcon_set_state_sync(rphy->edev,
 						      EXTCON_USB_HOST,
 						      !iddig);
-				extcon_set_state_sync(rphy->edev,
+				if (!rport->no_vbus_en_extcon)
+					extcon_set_state_sync(rphy->edev,
 						      EXTCON_USB_VBUS_EN,
 						      !iddig);
 				ret = rockchip_set_vbus_power(rport, !iddig);
