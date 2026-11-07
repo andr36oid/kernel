@@ -55,7 +55,7 @@
                 pwm-names = "enable";
                 rumble-boost-weak = <0x0000>;
                 rumble-boost-strong = <0x0000>;
-		 
+
                 joypad-name = "GO-Super Gamepad";
                 joypad-product = <0x1100>;
                 joypad-revision = <0x0100>;
@@ -159,13 +159,13 @@
 		/* required for RG351MP */
 		invert-absx;
 		invert-absy;
-		
+
 		/* gpio button auto repeat set value : default disable */
 		/*
 			autorepeat;
 		*/
 
-            	/*** GameConsole R36s Switch layout ***			 
+		/*** GameConsole R36s Switch layout ***
 				 /-----------------------------------------------/|
 			    /												/ |
                |------------------------------------------------| |
@@ -316,7 +316,7 @@
 			label = "vibrator";
 			gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "transient";
-		};		
+		};
 	};
 
 	/*
@@ -550,7 +550,7 @@
 		/* RK817 LDO8 */
 		power-supply = <&vcc_lcd>;
 
-		
+
 		prepare-delay-ms = <20>;
 		reset-delay-ms = <150>;
 		init-delay-ms = <20>;
@@ -615,7 +615,7 @@
 			05 14 01 28
 			05 0A 01 10
 		];
-		
+
 		display-timings {
 			native-mode = <&timing0>;
 
@@ -666,8 +666,8 @@
 				de-active = <0>;
 				pixelclk-active = <1>;
 			};
-		};		
-						
+		};
+
 		ports {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -1324,7 +1324,7 @@
 	status = "okay";
 
 	u2phy_host: host-port {
-		rockchip,low-power-mode;	
+		rockchip,low-power-mode;
 		status = "okay";
 	};
 
