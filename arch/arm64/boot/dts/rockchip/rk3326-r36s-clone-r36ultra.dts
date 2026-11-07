@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * EXPERIMENTAL - not tested on hardware by andr36oid. Keep a copy of the
+ * files you replace so you can go back.
+ *
+ * R36 Ultra (GR36-MB V1.1 board, eMMC model): EE clone G80 wiring, 720x720
+ * panel, RK915 SDIO Wi-Fi, RGB status LED, rumble motor on GPIO3_A6.
+ * 720x720 like the R36S Plus; the normal andr36oid image runs on it.
+ * The stock firmware lives on eMMC; see the experimental DTB readme.
+ * Panel, Wi-Fi, LED and motor values from the stock DTB dumped from the
+ * console; also compared with K4uanGP's R36Ultra andr36oid port
+ * (Andr36oid-dtb-for-Clones) and southoz's GR36 port (dArkOSRE-R36).
+ */
+
+/dts-v1/;
+#include "rk3326-r36s-clone-ee.dtsi"
+#include "rk3326-r36s-square.dtsi"
+
+/ {
+	model = "R36 Ultra (experimental)";
+};
+
+&dsi {
+	panel@0 {
+		prepare-delay-ms = <20>;
+		reset-delay-ms = <20>;
+		init-delay-ms = <20>;
+		enable-delay-ms = <120>;
+		disable-delay-ms = <20>;
+		unprepare-delay-ms = <20>;
+		width-mm = <153>;
+		height-mm = <85>;
+		dsi,flags = <(MIPI_DSI_MODE_VIDEO |
+		      MIPI_DSI_MODE_VIDEO_BURST |
+		      MIPI_DSI_MODE_EOT_PACKET |
+		      MIPI_DSI_MODE_LPM)>;
+		panel-init-sequence = [
+			39 00 04 b9 f1 12 83
+			39 00 06 b1 00 00 00 da 80
+			39 00 04 b2 3c 12 30
+			39 00 0b b3 10 10 28 28 03 ff 00 00 00 00
+			15 00 02 b4 80
+			39 00 03 b5 0a 0a
+			39 00 03 b6 97 97
+			39 00 05 b8 26 22 f0 13
+			39 00 1c ba 33 81 05 f9 0e 0e 20 00 00 00 00 00 00 00 44 25 00 90 0a 00 00 01 4f 01 00 00 37
+			15 00 02 bc 47
+			39 00 04 bf 02 11 00
+			39 00 0a c0 73 73 50 50 00 00 12 70 00
+			39 00 0d c1 25 00 32 32 77 e4 ff ff cc cc 77 77
+			39 00 07 c6 82 00 bf ff 00 ff
+			39 00 07 c7 b8 00 0a 00 00 00
+			39 00 05 c8 10 40 1e 02
+			15 00 02 cc 0b
+			39 00 23 e0 00 0b 10 2c 3d 3f 42 3a 07 0d 0f 13 15 13 14 0f 16 00 0b 10 2c 3d 3f 42 3a 07 0d 0f 13 15 13 14 0f 16
+			39 00 0f e3 07 07 0b 0b 0b 0b 00 00 00 00 ff 00 c0 10
+			39 00 40 e9 c8 10 0a 00 00 80 81 12 31 23 4f 86 a0 00 47 08 00 00 0c 00 00 00 00 00 0c 00 00 00 98 02 8b af 46 02 88 88 88 88 88 98 13 8b af 57 13 88 88 88 88 88 00 00 00 00 00 00 00 00 00 00 00 00 00
+			39 00 3e ea 97 0c 09 09 09 78 00 00 00 00 00 00 9f 31 8b a8 31 75 88 88 88 88 88 9f 20 8b a8 20 64 88 88 88 88 88 23 00 00 02 71 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 40 80 81 00 00 00 00
+			39 00 04 ef ff ff 01
+			05 fa 01 11
+			05 32 01 29
+		];
+		panel-exit-sequence = [
+			05 00 01 28
+			05 00 01 10
+		];
+		display-timings {
+			/* one mode only: the R36S alternates below do not fit this panel */
+			/delete-node/ timing1;
+			/delete-node/ timing2;
+		};
+	};
+};
+
+&timing0 {
+	clock-frequency = <50000000>;
+	hactive = <720>;
+	vactive = <720>;
+	hfront-porch = <140>;
+	hsync-len = <80>;
+	hback-porch = <140>;
+	vfront-porch = <28>;	/* was 20: 60.6 Hz; 59.97 Hz, same pixel clock */
+	vsync-len = <4>;
+	vback-porch = <20>;
+	hsync-active = <0>;
+	vsync-active = <0>;
+	de-active = <0>;
+	pixelclk-active = <0>;
+};
+
+/*
+ * RK915 SDIO Wi-Fi instead of a second card slot. Power enable GPIO0_A2
+ * (active high), out-of-band interrupt GPIO0_A1: the same as the stock DTB
+ * and the Batocera R36 Ultra DT. Needs the RK915 driver from the
+ * night/rk915 branch, which reads supports-rk915 and wifi_chip_type
+ * "rk915". Kernels without it ignore both, and the slot stays empty.
+ * (Stock sets "supports-rk912"; the 4.19 driver uses "supports-rk915".)
+ */
+/ {
+	wireless-wlan {
+		wifi_chip_type = "rk915";
+		WIFI,poweren_gpio = <&gpio0 RK_PA2 GPIO_ACTIVE_HIGH>;
+		WIFI,host_wake_irq = <&gpio0 RK_PA1 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&sdio {
+	/delete-property/ supports-sd;
+	/delete-property/ cd-gpios;
+	/delete-property/ card-detect-delay;
+	/delete-property/ cap-mmc-highspeed;
+	/delete-property/ sd-uhs-sdr12;
+	/delete-property/ sd-uhs-sdr25;
+	/delete-property/ sd-uhs-sdr50;
+	/delete-property/ sd-uhs-sdr104;
+	/delete-property/ vmmc-supply;
+	/delete-property/ vqmmc-supply;
+	max-frequency = <50000000>;
+	supports-sdio;
+	supports-rk915;
+	keep-power-in-suspend;
+};
+
+/*
+ * The gpio2 PA2/PA1/PA0 RGB is NOT a plain status LED: on stock these are the
+ * micro,gamepad red/green/blue-gpio, owned by the gamepad driver - i.e. the
+ * lighting around the analog sticks. So instead of dumb on/off gpio-leds we
+ * hand them to the joypad LED engine below, which software-PWMs them for
+ * brightness, breathing, rainbow, stick-direction and battery effects. The
+ * board's own power/charge status LED (GPIO0_C1, base gpio_leds) is left as
+ * is. led_pins still muxes PA0-2 to GPIO; the engine claims them on probe.
+ */
+
+/*
+ * rumble motor, driven by the joypad so games see it as gamepad rumble.
+ * Active high as in the K4uanGP and dArkOSRE GR36 ports and the XF35H/XF40H
+ * stock DTBs (the stock "motor-gpio" here carries an active-low flag, but
+ * its vendor driver is not known to read it). led_pins keeps the pin
+ * pulled down until the joypad driver takes it.
+ */
+&joypad {
+	rumble-gpios = <&gpio3 RK_PA6 GPIO_ACTIVE_HIGH>;
+
+	/*
+	 * Stick-ring RGB. One shared trio here; a board that wires the left
+	 * and right rings separately can add led-{red,green,blue}-right-gpios
+	 * and the engine drives them independently. Default: solid accent
+	 * orange; userspace overwrites the colour with the real system accent.
+	 */
+	led-red-gpios   = <&gpio2 RK_PA2 GPIO_ACTIVE_HIGH>;
+	led-green-gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_HIGH>;
+	led-blue-gpios  = <&gpio2 RK_PA0 GPIO_ACTIVE_HIGH>;
+	andr36oid,led-default-mode = "static";
+	andr36oid,led-default-color = <0xff7a00>;
+	andr36oid,led-default-brightness = <160>;
+	andr36oid,led-default-speed = <40>;
+};
+
+&led_pins {
+	rockchip,pins =
+		<0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>,
+		<0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>,
+		<2 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>,
+		<2 RK_PA1 RK_FUNC_GPIO &pcfg_pull_none>,
+		<2 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
+		<3 RK_PA6 RK_FUNC_GPIO &pcfg_pull_down>;
+};
+
+/*
+ * Stick-ring "keros" effect-LED IC. It is NOT an I2C device even though the
+ * stock DT places fb_keros@1C on i2c1: the chip is driven by a pulse-count
+ * frame on a single control GPIO (GPIO0_B3), gated by a power-enable GPIO
+ * (GPIO0_B6, the stock "led-gpio"). GPIO0_B3 is free on this board: on EE
+ * clones dc_det moved to gpio3 PA5 (rk3326-r36s-clone-ee.dtsi) and the
+ * pmic_int group was reduced to GPIO0_B2, so nothing else muxes or claims
+ * B3 or B6.
+ *
+ * leds-keros registers /sys/class/leds/keros::ambient, max_brightness 11:
+ * 0 = off (enable dropped, chip unpowered, guaranteed dark), 1..9 = built-in
+ * effects, 11 = chip init/off. It leaves the rings dark at probe.
+ *
+ * This is a different bank from the gpio2 PA0-2 joypad RGB above and is left
+ * in place alongside it; the two are expected to be different physical LEDs.
+ * Confirm on hardware which rings each path lights before removing either.
+ */
+/ {
+	keros_leds: keros-leds {
+		compatible = "keros,pulse-leds";
+		ctrl-gpios   = <&gpio0 RK_PB3 GPIO_ACTIVE_HIGH>;   /* VERIFY pin on HW */
+		enable-gpios = <&gpio0 RK_PB6 GPIO_ACTIVE_HIGH>;   /* = stock led-gpio */
+		pinctrl-names = "default";
+		pinctrl-0 = <&keros_pins>;
+		status = "okay";
+	};
+};
+
+&pinctrl {
+	keros {
+		keros_pins: keros-pins {
+			rockchip,pins =
+				<0 RK_PB3 RK_FUNC_GPIO &pcfg_pull_none>,
+				<0 RK_PB6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&rk817 {
+	charger {
+		max_input_current = <500>;
+		max_chrg_current = <500>;
+	};
+
+	battery {
+		/*
+		 * Stock values, from the stock DTBs dumped from the R36 Ultra
+		 * (V1 and V2).
+		 */
+		ocv_table = <3500 3521 3546 3565 3580 3592 3602
+			3615 3630 3657 3689 3714 3743 3776
+			3812 3853 3897 3946 4001 4069 4180>;
+		design_capacity = <2832>;
+		design_qmax = <3115>;
+		bat_res = <150>;
+		power_off_thresd = <3500>;
+		zero_algorithm_vol = <3850>;
+	};
+};
+
+/*
+ * Audio. The stock R36 Ultra uses rockchip,multicodecs-card - confirmed by
+ * reading the stock EmuELEC dtb off the eMMC (rk3326-evb-lp3-v12-linux.dtb):
+ * multicodecs-card + rk817 codec, spk-ctl on gpio3 PA7, hp-det on gpio2 PC6.
+ *
+ * The generic simple-audio-card the base board ships DOES register a card
+ * here, but on this board it never establishes a powered playback route to the
+ * rk817 output stage (boot log: "no sink/source widget" for the codec's
+ * MIC_IN/HPOL/HPOR pins). The PCM runs and the DMA pointer advances, but there
+ * is no analog output - dead silent even with the path forced to SPK_HP and the
+ * hardware master switch on. Only the rk817-aware multicodecs machine driver
+ * sets up the DAI/DAPM this codec needs, so match stock: use multicodecs-card
+ * (now built via CONFIG_SND_SOC_ROCKCHIP_MULTICODECS in lineageos_r36s_defconfig).
+ *
+ * Keep force_spk_hp as belt-and-braces: this board's jack detect is unreliable,
+ * so force every active playback to SPK_HP and let the jack's own switch mute
+ * the speaker when headphones go in. KT "Speaker + headphones always on" reads
+ * this as the default and can still turn it off at runtime.
+ */
+/ {
+	/delete-node/ rk817-sound;
+};
+
+/ {
+	rk817-sound {
+		compatible = "rockchip,multicodecs-card";
+		rockchip,card-name = "rockchip-rk817";
+		rockchip,format = "i2s";
+		rockchip,mclk-fs = <256>;
+		rockchip,cpu = <&i2s1_2ch>;
+		rockchip,codec = <&rk817_codec>;
+		rockchip,codec-hp-det;
+	};
+};
+
+/* Match the stock codec tuning for this board: louder speaker/headphone volume
+ * and the amp mute delay stock uses, plus the force-speaker-path default. */
+&rk817_codec {
+	spk-volume = <0x0f>;
+	hp-volume = <0x0f>;
+	spk-mute-delay-ms = <500>;
+	rockchip,force-spk-hp;
+};

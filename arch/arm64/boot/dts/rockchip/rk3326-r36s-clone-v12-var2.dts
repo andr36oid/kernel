@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * EXPERIMENTAL - not tested on hardware by andr36oid. Keep a copy of the
+ * files you replace so you can go back.
+ *
+ * EE clone "R36S-V12 2023-08-18 Variant 2 Panel 1": stick mux enable on
+ * GPIO2_B4 (as K36), LCD reset on GPIO3_D3 (as G80), LCD powered from RK817
+ * LDO8. Panel 8.
+ * Source: dArkOSRE ports by southoz (dArkOSRE-R36, clone/R36S-V12 ... Variant 2).
+ */
+
+/dts-v1/;
+#include "rk3326-r36s-clone-ee.dtsi"
+#include "rk3326-r36s-clone-panel8.dtsi"
+
+/ {
+	model = "R36S-V12 clone variant 2 (experimental)";
+};
+
+&joypad {
+	amux-en-gpios = <&gpio2 RK_PB4 GPIO_ACTIVE_LOW>;
+};
+
+&dsi {
+	panel@0 {
+		power-supply = <&vcc_lcd>;
+	};
+};
+
+&vcc_lcd_sw {
+	status = "disabled";
+};
+
+&rk817 {
+	battery {
+		/*
+		 * Battery values of the R36S-V12 Variant 2 Panel 1 firmware
+		 * (kernel DTB in southoz's dArkOSRE-R36 port).
+		 */
+		ocv_table = <3350 3386 3422 3455 3488 3528 3575
+			3620 3654 3684 3714 3737 3762 3802
+			3841 3861 3870 3894 3929 3962 4033>;
+		design_capacity = <2539>;
+		design_qmax = <2793>;
+		bat_res = <102>;
+		power_off_thresd = <3350>;
+		zero_algorithm_vol = <3850>;
+	};
+};

@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * EXPERIMENTAL - not tested on hardware by andr36oid. Keep a copy of the
+ * files you replace so you can go back.
+ *
+ * EE clone, G80 board (G80C-MB V1.1, G80CA-MB V1.2/V1.3, G80D-MB V1.0; also
+ * some R36S-V12 boards wired like the G80, and EmuELEC R36S clones with
+ * Panel 5 on a G80C/G80D board) with Panel 8. V12 boards whose panel needs a
+ * continuous DSI clock: rk3326-r36s-clone-v12-var1-panel8.dts.
+ * Sources: K4uanGP's G80CA andr36oid port (Andr36oid-dtb-for-Clones),
+ * the dArkOSRE ports by southoz (dArkOSRE-R36, clone/G80*), stock DTBs.
+ */
+
+/dts-v1/;
+#include "rk3326-r36s-clone-ee.dtsi"
+#include "rk3326-r36s-clone-panel8.dtsi"
+
+/ {
+	model = "R36S clone G80, Panel 8 (experimental)";
+};
