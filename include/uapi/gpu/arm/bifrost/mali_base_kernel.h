@@ -240,6 +240,28 @@ struct base_mem_aliasing_info {
  * Kbase version history:
  * 11.20: added @heap_info_gpu_addr
  */
+/* Android r21p0 uses the pre-11.20 JIT allocation layout. */
+struct base_jit_alloc_info_10_2 {
+	__u64 gpu_alloc_addr;
+	__u64 va_pages;
+	__u64 commit_pages;
+	__u64 extent;
+	__u8 id;
+};
+
+struct base_jit_alloc_info_11_5 {
+	__u64 gpu_alloc_addr;
+	__u64 va_pages;
+	__u64 commit_pages;
+	__u64 extent;
+	__u8 id;
+	__u8 bin_id;
+	__u8 max_allocations;
+	__u8 flags;
+	__u8 padding[2];
+	__u16 usage_id;
+};
+
 struct base_jit_alloc_info {
 	__u64 gpu_alloc_addr;
 	__u64 va_pages;

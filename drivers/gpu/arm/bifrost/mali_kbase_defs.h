@@ -2013,6 +2013,7 @@ struct kbase_context {
 	struct work_struct *job_fault_work;
 #endif /* CONFIG_DEBUG_FS */
 	struct kbase_va_region *jit_alloc[1 + BASE_JIT_ALLOC_COUNT];
+	u8 jit_version; /* 1: 10.2, 2: 11.5, 3: current JIT UAPI */
 	u8 jit_max_allocations;
 	u8 jit_current_allocations;
 	u8 jit_current_allocations_per_bin[256];

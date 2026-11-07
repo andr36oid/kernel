@@ -1052,10 +1052,51 @@ static int kbase_api_get_ddk_version(struct kbase_context *kctx,
 	return len;
 }
 
+/* Defaults for legacy just-in-time memory allocator initialization
+ * kernel calls
+ */
+#define DEFAULT_MAX_JIT_ALLOCATIONS 255
+#define JIT_LEGACY_TRIM_LEVEL (0) /* No trimming */
+
+static int kbase_api_mem_jit_init_10_2(struct kbase_context *kctx,
+		struct kbase_ioctl_mem_jit_init_10_2 *jit_init)
+{
+	kctx->jit_version = 1;
+
+	/* since no phys_pages parameter, use the maximum: va_pages */
+	return kbase_region_tracker_init_jit(kctx, jit_init->va_pages,
+			DEFAULT_MAX_JIT_ALLOCATIONS,
+			JIT_LEGACY_TRIM_LEVEL, BASE_MEM_GROUP_DEFAULT,
+			jit_init->va_pages);
+}
+
+static int kbase_api_mem_jit_init_11_5(struct kbase_context *kctx,
+		struct kbase_ioctl_mem_jit_init_11_5 *jit_init)
+{
+	int i;
+
+	kctx->jit_version = 2;
+
+	for (i = 0; i < sizeof(jit_init->padding); i++) {
+		/* Ensure all padding bytes are 0 for potential future
+		 * extension
+		 */
+		if (jit_init->padding[i])
+			return -EINVAL;
+	}
+
+	/* since no phys_pages parameter, use the maximum: va_pages */
+	return kbase_region_tracker_init_jit(kctx, jit_init->va_pages,
+			jit_init->max_allocations, jit_init->trim_level,
+			jit_init->group_id, jit_init->va_pages);
+}
+
 static int kbase_api_mem_jit_init(struct kbase_context *kctx,
 				  struct kbase_ioctl_mem_jit_init *jit_init)
 {
 	size_t i;
+
+	kctx->jit_version = 3;
 
 	for (i = 0; i < sizeof(jit_init->padding); i++) {
 		/* Ensure all padding bytes are 0 for potential future
@@ -1836,6 +1877,18 @@ static long kbase_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case KBASE_IOCTL_GET_DDK_VERSION:
 		KBASE_HANDLE_IOCTL_IN(KBASE_IOCTL_GET_DDK_VERSION, kbase_api_get_ddk_version,
 				      struct kbase_ioctl_get_ddk_version, kctx);
+		break;
+	case KBASE_IOCTL_MEM_JIT_INIT_10_2:
+		KBASE_HANDLE_IOCTL_IN(KBASE_IOCTL_MEM_JIT_INIT_10_2,
+				kbase_api_mem_jit_init_10_2,
+				struct kbase_ioctl_mem_jit_init_10_2,
+				kctx);
+		break;
+	case KBASE_IOCTL_MEM_JIT_INIT_11_5:
+		KBASE_HANDLE_IOCTL_IN(KBASE_IOCTL_MEM_JIT_INIT_11_5,
+				kbase_api_mem_jit_init_11_5,
+				struct kbase_ioctl_mem_jit_init_11_5,
+				kctx);
 		break;
 	case KBASE_IOCTL_MEM_JIT_INIT:
 		KBASE_HANDLE_IOCTL_IN(KBASE_IOCTL_MEM_JIT_INIT, kbase_api_mem_jit_init,

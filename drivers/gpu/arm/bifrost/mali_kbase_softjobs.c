@@ -927,6 +927,16 @@ int kbasep_jit_alloc_validate(struct kbase_context *kctx, struct base_jit_alloc_
 
 #if !MALI_USE_CSF
 
+static const size_t jit_info_copy_size_for_jit_version[] = {
+	/* in jit_version 1, the structure did not have any end padding, hence
+	 * it could be a different size on 32 and 64-bit clients. We therefore
+	 * do not copy past the last member
+	 */
+	[1] = offsetofend(struct base_jit_alloc_info_10_2, id),
+	[2] = sizeof(struct base_jit_alloc_info_11_5),
+	[3] = sizeof(struct base_jit_alloc_info)
+};
+
 static int kbase_jit_allocate_prepare(struct kbase_jd_atom *katom)
 {
 	__user u8 *data = (__user u8 *)(uintptr_t)katom->jc;
@@ -936,6 +946,18 @@ static int kbase_jit_allocate_prepare(struct kbase_jd_atom *katom)
 	u32 count;
 	int ret;
 	u32 i;
+	size_t copy_size;
+
+	if (!kctx->jit_version ||
+	    kctx->jit_version >= ARRAY_SIZE(jit_info_copy_size_for_jit_version)) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	copy_size = jit_info_copy_size_for_jit_version[kctx->jit_version];
+	if (WARN_ON(copy_size > sizeof(*info))) {
+		ret = -EINVAL;
+		goto fail;
+	}
 
 	if (!kbase_mem_allow_alloc(kctx)) {
 		dev_dbg(kbdev->dev, "Invalid attempt to allocate JIT memory by %s/%d for ctx %d_%d",
@@ -947,7 +969,7 @@ static int kbase_jit_allocate_prepare(struct kbase_jd_atom *katom)
 	/* For backwards compatibility, and to prevent reading more than 1 jit
 	 * info struct on jit version 1
 	 */
-	if (katom->nr_extres == 0)
+	if (katom->nr_extres == 0 || kctx->jit_version == 1)
 		katom->nr_extres = 1;
 	count = katom->nr_extres;
 
@@ -966,11 +988,13 @@ static int kbase_jit_allocate_prepare(struct kbase_jd_atom *katom)
 
 	katom->softjob_data = info;
 
-	for (i = 0; i < count; i++, info++, data += sizeof(*info)) {
-		if (copy_from_user(info, data, sizeof(*info)) != 0) {
+	for (i = 0; i < count; i++, info++, data += copy_size) {
+		if (copy_from_user(info, data, copy_size) != 0) {
 			ret = -EINVAL;
 			goto free_info;
 		}
+
+		memset((u8 *)info + copy_size, 0, sizeof(*info) - copy_size);
 
 		ret = kbasep_jit_alloc_validate(kctx, info);
 		if (ret)
