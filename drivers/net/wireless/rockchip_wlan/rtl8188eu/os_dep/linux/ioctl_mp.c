@@ -43,12 +43,13 @@ int rtw_mp_write_reg(struct net_device *dev,
 	u32 addr, data;
 	int ret;
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	char input[wrqu->length + 1];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 
-	_rtw_memset(input, 0, sizeof(input));
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 
@@ -58,14 +59,14 @@ int rtw_mp_write_reg(struct net_device *dev,
 
 	pnext = strpbrk(pch, " ,.-");
 	if (pnext == NULL)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	*pnext = 0;
 	width_str = pch;
 
 	pch = pnext + 1;
 	pnext = strpbrk(pch, " ,.-");
 	if (pnext == NULL)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	*pnext = 0;
 	/*addr = simple_strtoul(pch, &ptmp, 16);
 	_rtw_memset(buf, '\0', sizeof(buf));
@@ -73,12 +74,12 @@ int rtw_mp_write_reg(struct net_device *dev,
 	ret = kstrtoul(buf, 16, &addr);*/
 	ret = sscanf(pch, "%x", &addr);
 	if (addr > MP_READ_REG_MAX_OFFSET)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	pch = pnext + 1;
 	pnext = strpbrk(pch, " ,.-");
 	if ((pch - input) >= wrqu->length)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	/*data = simple_strtoul(pch, &ptmp, 16);*/
 	ret = sscanf(pch, "%x", &data);
 	RTW_INFO("data=%x,addr=%x\n", (u32)data, (u32)addr);
@@ -110,7 +111,10 @@ int rtw_mp_write_reg(struct net_device *dev,
 		break;
 	}
 
-	return ret;
+	do { input_result = ret; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -129,7 +133,8 @@ int rtw_mp_read_reg(struct net_device *dev,
 		    struct iw_request_info *info,
 		    struct iw_point *wrqu, char *extra)
 {
-	char input[wrqu->length + 1];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	char *pch, *pnext;
 	char *width_str;
 	char width;
@@ -140,11 +145,11 @@ int rtw_mp_read_reg(struct net_device *dev,
 	char *pextra = extra;
 
 	if (wrqu->length > 128)
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	_rtw_memset(extra, 0, wrqu->length);
@@ -153,7 +158,7 @@ int rtw_mp_read_reg(struct net_device *dev,
 	pch = input;
 	pnext = strpbrk(pch, " ,.-");
 	if (pnext == NULL)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	*pnext = 0;
 	width_str = pch;
 
@@ -161,7 +166,7 @@ int rtw_mp_read_reg(struct net_device *dev,
 
 	ret = sscanf(pch, "%x", &addr);
 	if (addr > MP_READ_REG_MAX_OFFSET)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	ret = 0;
 	width = width_str[0];
@@ -245,7 +250,10 @@ int rtw_mp_read_reg(struct net_device *dev,
 		break;
 	}
 
-	return ret;
+	do { input_result = ret; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -263,24 +271,24 @@ int rtw_mp_write_rf(struct net_device *dev,
 	u32 path, addr, data;
 	int ret;
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	char input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-
-	_rtw_memset(input, 0, wrqu->length);
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 
 	ret = sscanf(input, "%d,%x,%x", &path, &addr, &data);
 	if (ret < 3)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	if (path >= GET_HAL_RFPATH_NUM(padapter))
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	if (addr > 0xFF)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	if (data > 0xFFFFF)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	_rtw_memset(extra, 0, wrqu->length);
 
@@ -289,7 +297,10 @@ int rtw_mp_write_rf(struct net_device *dev,
 	sprintf(extra, "write_rf completed\n");
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -305,7 +316,8 @@ int rtw_mp_read_rf(struct net_device *dev,
 		   struct iw_request_info *info,
 		   struct iw_point *wrqu, char *extra)
 {
-	char input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	char *pch, *pnext;
 	char data[20], tmp[20];
 	u32 path, addr, strtou;
@@ -314,19 +326,20 @@ int rtw_mp_read_rf(struct net_device *dev,
 	char *pextra = extra;
 
 	if (wrqu->length > 128)
-		return -EFAULT;
-	_rtw_memset(input, 0, wrqu->length);
+		do { input_result = -EFAULT; goto out_input; } while (0);
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	ret = sscanf(input, "%d,%x", &path, &addr);
 	if (ret < 2)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	if (path >= GET_HAL_RFPATH_NUM(padapter))
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 	if (addr > 0xFF)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	_rtw_memset(extra, 0, wrqu->length);
 
@@ -358,7 +371,10 @@ int rtw_mp_read_rf(struct net_device *dev,
 	}
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -420,13 +436,14 @@ int rtw_mp_rate(struct net_device *dev,
 		struct iw_point *wrqu, char *extra)
 {
 	u32 rate = MPT_RATE_1M;
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	PMPT_CONTEXT		pMptCtx = &(padapter->mppriv.mpt_ctx);
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	rate = rtw_mpRateParseFunc(padapter, input);
@@ -453,13 +470,16 @@ int rtw_mp_rate(struct net_device *dev,
 	RTW_INFO("%s: %s rate index=%d\n", __func__, input, padapter->mppriv.rateidx);
 
 	if (padapter->mppriv.rateidx >= DESC_RATEVHTSS4MCS9)
-		return -EINVAL;
+		do { input_result = -EINVAL; goto out_input; } while (0);
 
 	pMptCtx->mpt_rate_index = HwRateToMPTRate(padapter->mppriv.rateidx);
 	SetDataRate(padapter);
 
 	wrqu->length = strlen(extra);
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -470,12 +490,13 @@ int rtw_mp_channel(struct net_device *dev,
 
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	HAL_DATA_TYPE	*pHalData	= GET_HAL_DATA(padapter);
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u32	channel = 1;
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	channel = rtw_atoi(input);
@@ -487,7 +508,10 @@ int rtw_mp_channel(struct net_device *dev,
 	pHalData->current_channel = channel;
 
 	wrqu->length = strlen(extra);
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -497,12 +521,13 @@ int rtw_mp_ch_offset(struct net_device *dev,
 {
 
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u32	ch_offset = 0;
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	ch_offset = rtw_atoi(input);
@@ -513,7 +538,10 @@ int rtw_mp_ch_offset(struct net_device *dev,
 	SetChannel(padapter);
 
 	wrqu->length = strlen(extra);
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -524,10 +552,13 @@ int rtw_mp_bandwidth(struct net_device *dev,
 	u32 bandwidth = 0, sg = 0;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	HAL_DATA_TYPE	*pHalData	= GET_HAL_DATA(padapter);
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
+
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	if (sscanf(input, "40M=%d,shortGI=%d", &bandwidth, &sg) > 0)
 		RTW_INFO("%s: bw=%d sg=%d\n", __func__, bandwidth , sg);
@@ -547,7 +578,10 @@ int rtw_mp_bandwidth(struct net_device *dev,
 
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -557,17 +591,18 @@ int rtw_mp_txpower_index(struct net_device *dev,
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
  	HAL_DATA_TYPE	*phal_data	= GET_HAL_DATA(padapter);
-	char input[wrqu->length + 1];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u32 rfpath;
 	u32 txpower_inx;
 
 	if (wrqu->length > 128)
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
-	_rtw_memset(input, 0, sizeof(input));
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 
@@ -593,7 +628,10 @@ int rtw_mp_txpower_index(struct net_device *dev,
 	}
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -603,13 +641,16 @@ int rtw_mp_txpower(struct net_device *dev,
 {
 	u32 idx_a = 0, idx_b = 0, idx_c = 0, idx_d = 0;
 	int MsetPower = 1;
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	PMPT_CONTEXT		pMptCtx = &(padapter->mppriv.mpt_ctx);
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	MsetPower = strncmp(input, "off", 3);
 	if (MsetPower == 0) {
@@ -632,7 +673,10 @@ int rtw_mp_txpower(struct net_device *dev,
 	}
 
 	wrqu->length = strlen(extra);
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -641,14 +685,15 @@ int rtw_mp_ant_tx(struct net_device *dev,
 		  struct iw_point *wrqu, char *extra)
 {
 	u8 i;
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u16 antenna = 0;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	HAL_DATA_TYPE	*pHalData = GET_HAL_DATA(padapter);
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	sprintf(extra, "switch Tx antenna to %s", input);
@@ -685,7 +730,10 @@ int rtw_mp_ant_tx(struct net_device *dev,
 	SetAntenna(padapter);
 
 	wrqu->length = strlen(extra);
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -695,13 +743,14 @@ int rtw_mp_ant_rx(struct net_device *dev,
 {
 	u8 i;
 	u16 antenna = 0;
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	HAL_DATA_TYPE	*pHalData = GET_HAL_DATA(padapter);
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	/*RTW_INFO("%s: input=%s\n", __func__, input);*/
@@ -734,7 +783,10 @@ int rtw_mp_ant_rx(struct net_device *dev,
 	SetAntenna(padapter);
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -892,13 +944,14 @@ int rtw_mp_disable_bt_coexist(struct net_device *dev,
 	PADAPTER padapter = (PADAPTER)rtw_netdev_priv(dev);
 
 #endif
-	u8 input[wrqu->data.length + 1];
+	u8 *input = kzalloc((size_t)wrqu->data.length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u32 bt_coexist;
 
-	_rtw_memset(input, 0, sizeof(input));
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
 	if (copy_from_user(input, wrqu->data.pointer, wrqu->data.length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->data.length] = '\0';
 
@@ -920,7 +973,10 @@ int rtw_mp_disable_bt_coexist(struct net_device *dev,
 #endif
 	}
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -930,22 +986,25 @@ int rtw_mp_arx(struct net_device *dev,
 {
 	int bStartRx = 0, bStopRx = 0, bQueryPhy = 0, bQueryMac = 0, bSetBssid = 0, bSetRxframe = 0;
 	int bmac_filter = 0, bmon = 0, bSmpCfg = 0;
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	char *pch, *token, *tmp[2] = {0x00, 0x00};
 	u32 i = 0, jj = 0, kk = 0, cnts = 0, ret;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	struct mp_priv *pmppriv = &padapter->mppriv;
 	struct dbg_rx_counter rx_counter;
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	RTW_INFO("%s: %s\n", __func__, input);
 #ifdef CONFIG_CONCURRENT_MODE
 	if (!is_primary_adapter(padapter)) {
 		sprintf(extra, "Error: MP mode can't support Virtual Adapter, Please to use main Adapter.\n");
 		wrqu->length = strlen(extra);
-		return 0;
+		do { input_result = 0; goto out_input; } while (0);
 	}
 #endif
 	bStartRx = (strncmp(input, "start", 5) == 0) ? 1 : 0; /* strncmp TRUE is 0*/
@@ -971,7 +1030,7 @@ int rtw_mp_arx(struct net_device *dev,
 		if ((tmp[0] != NULL) && (tmp[1] != NULL)) {
 			cnts = strlen(tmp[1]) / 2;
 			if (cnts < 1)
-				return -EFAULT;
+				do { input_result = -EFAULT; goto out_input; } while (0);
 			RTW_INFO("%s: cnts=%d\n", __func__, cnts);
 			RTW_INFO("%s: data=%s\n", __func__, tmp[1]);
 			for (jj = 0, kk = 0; jj < cnts ; jj++, kk += 2) {
@@ -979,7 +1038,7 @@ int rtw_mp_arx(struct net_device *dev,
 				RTW_INFO("network_macaddr[%d]=%x\n", jj, pmppriv->network_macaddr[jj]);
 			}
 		} else
-			return -EFAULT;
+			do { input_result = -EFAULT; goto out_input; } while (0);
 
 		pmppriv->bSetRxBssid = _TRUE;
 	}
@@ -1002,7 +1061,7 @@ int rtw_mp_arx(struct net_device *dev,
 		if ((tmp[0] != NULL) && (tmp[1] != NULL)) {
 			cnts = strlen(tmp[1]) / 2;
 			if (cnts < 1)
-				return -EFAULT;
+				do { input_result = -EFAULT; goto out_input; } while (0);
 			RTW_INFO("%s: cnts=%d\n", __func__, cnts);
 			RTW_INFO("%s: data=%s\n", __func__, tmp[1]);
 			for (jj = 0, kk = 0; jj < cnts ; jj++, kk += 2) {
@@ -1010,7 +1069,7 @@ int rtw_mp_arx(struct net_device *dev,
 				RTW_INFO("%s mac_filter[%d]=%x\n", __func__, jj, pmppriv->mac_filter[jj]);
 			}
 		} else
-			return -EFAULT;
+			do { input_result = -EFAULT; goto out_input; } while (0);
 
 	}
 
@@ -1074,7 +1133,10 @@ int rtw_mp_arx(struct net_device *dev,
 
 	wrqu->length = strlen(extra) + 1;
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1115,10 +1177,13 @@ int rtw_mp_pwrtrk(struct net_device *dev,
 	u32 thermal;
 	s32 ret;
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
+
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	_rtw_memset(extra, 0, wrqu->length);
 
@@ -1131,19 +1196,22 @@ int rtw_mp_pwrtrk(struct net_device *dev,
 		} else if (sscanf(input, "ther=%d", &thermal) == 1) {
 			ret = SetThermalMeter(padapter, (u8)thermal);
 			if (ret == _FAIL)
-				return -EPERM;
+				do { input_result = -EPERM; goto out_input; } while (0);
 			sprintf(extra, "mp tx power tracking start,target value=%d ok", thermal);
 		} else
-			return -EINVAL;
+			do { input_result = -EINVAL; goto out_input; } while (0);
 	}
 
 	ret = SetPowerTracking(padapter, enable);
 	if (ret == _FAIL)
-		return -EPERM;
+		do { input_result = -EPERM; goto out_input; } while (0);
 
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1153,18 +1221,22 @@ int rtw_mp_psd(struct net_device *dev,
 	       struct iw_point *wrqu, char *extra)
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	u8		input[wrqu->length + 1];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
+	if (!input) { input_result = -ENOMEM; goto out_input; }
 
-	_rtw_memset(input, 0, sizeof(input));
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	input[wrqu->length] = '\0';
 	strcpy(extra, input);
 
 	wrqu->length = mp_query_psd(padapter, extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1306,20 +1378,26 @@ int rtw_mp_dump(struct net_device *dev,
 		struct iw_point *wrqu, char *extra)
 {
 	struct mp_priv *pmp_priv;
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	PADAPTER padapter = rtw_netdev_priv(dev);
 
 	pmp_priv = &padapter->mppriv;
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	if (strncmp(input, "all", 4) == 0) {
 		mac_reg_dump(RTW_DBGDUMP, padapter);
 		bb_reg_dump(RTW_DBGDUMP, padapter);
 		rf_reg_dump(RTW_DBGDUMP, padapter);
 	}
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1330,13 +1408,16 @@ int rtw_mp_phypara(struct net_device *dev,
 
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	HAL_DATA_TYPE	*pHalData	= GET_HAL_DATA(padapter);
-	char	input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	u32		invalxcap = 0, ret = 0, bwrite_xcap = 0, hwxtaladdr = 0;
 	u16		pgval;
 
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	RTW_INFO("%s:priv in=%s\n", __func__, input);
 	bwrite_xcap = (strncmp(input, "write_xcap=", 11) == 0) ? 1 : 0;
@@ -1376,7 +1457,10 @@ int rtw_mp_phypara(struct net_device *dev,
 	}
 
 	wrqu->length = strlen(extra) + 1;
-	return ret;
+	do { input_result = ret; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1385,16 +1469,19 @@ int rtw_mp_SetRFPath(struct net_device *dev,
 		     struct iw_point *wrqu, char *extra)
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	char	input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	int		bMain = 1, bTurnoff = 1;
 #ifdef CONFIG_ANTENNA_DIVERSITY
 	u8 ret = _TRUE;
 #endif
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	RTW_INFO("%s:iwpriv in=%s\n", __func__, input);
 
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	bMain = strncmp(input, "1", 2); /* strncmp TRUE is 0*/
 	bTurnoff = strncmp(input, "0", 3); /* strncmp TRUE is 0*/
@@ -1426,7 +1513,10 @@ int rtw_mp_SetRFPath(struct net_device *dev,
 
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1436,13 +1526,16 @@ int rtw_mp_switch_rf_path(struct net_device *dev,
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	struct mp_priv *pmp_priv;
-	char	input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	int		bwlg = 1, bwla = 1, btg = 1, bbt=1;
 	u8 ret = 0;
 
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	pmp_priv = &padapter->mppriv;
 
@@ -1469,7 +1562,7 @@ int rtw_mp_switch_rf_path(struct net_device *dev,
 		sprintf(extra, "switch rf path BG\n");
 	} else {
 		sprintf(extra, "Error set %s\n", __func__);
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 	}
 
 	mp_phy_switch_rf_path_set(padapter, &pmp_priv->rf_path_cfg);
@@ -1477,21 +1570,27 @@ int rtw_mp_switch_rf_path(struct net_device *dev,
 
 	wrqu->length = strlen(extra);
 
-	return ret;
+	do { input_result = ret; goto out_input; } while (0);
 
+out_input:
+	kfree(input);
+	return input_result;
 }
 int rtw_mp_QueryDrv(struct net_device *dev,
 		    struct iw_request_info *info,
 		    union iwreq_data *wrqu, char *extra)
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	char	input[wrqu->data.length];
+	char *input = kzalloc((size_t)wrqu->data.length + 1, GFP_KERNEL);
+	int input_result = 0;
 	int	qAutoLoad = 1;
 
 	PHAL_DATA_TYPE pHalData = GET_HAL_DATA(padapter);
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->data.pointer, wrqu->data.length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 	RTW_INFO("%s:iwpriv in=%s\n", __func__, input);
 
 	qAutoLoad = strncmp(input, "autoload", 8); /* strncmp TRUE is 0*/
@@ -1505,7 +1604,10 @@ int rtw_mp_QueryDrv(struct net_device *dev,
 			sprintf(extra, "ok");
 	}
 	wrqu->data.length = strlen(extra) + 1;
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 
@@ -1514,11 +1616,14 @@ int rtw_mp_PwrCtlDM(struct net_device *dev,
 		    struct iw_point *wrqu, char *extra)
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
-	u8		input[wrqu->length];
+	u8 *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	int		bstart = 1;
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	bstart = strncmp(input, "start", 5); /* strncmp TRUE is 0*/
 	if (bstart == 0) {
@@ -1530,7 +1635,10 @@ int rtw_mp_PwrCtlDM(struct net_device *dev,
 	}
 	wrqu->length = strlen(extra);
 
-	return 0;
+	do { input_result = 0; goto out_input; } while (0);
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 int rtw_mp_iqk(struct net_device *dev,
@@ -2505,7 +2613,8 @@ int rtw_mp_link(struct net_device *dev,
 {
 	PADAPTER padapter = rtw_netdev_priv(dev);
 	struct mp_priv *pmp_priv;
-	char	input[wrqu->length];
+	char *input = kzalloc((size_t)wrqu->length + 1, GFP_KERNEL);
+	int input_result = 0;
 	int		bgetrxdata = 0, btxdata = 0, bsetbt = 0;
 	u8 err = 0 , num;
 	u32 i = 0, datalen = 0, j = 0, jj, kk, waittime = 0, n = 0, btdata;
@@ -2516,8 +2625,10 @@ int rtw_mp_link(struct net_device *dev,
 
 	pmp_priv = &padapter->mppriv;
 
+	if (!input) { input_result = -ENOMEM; goto out_input; }
+
 	if (copy_from_user(input, wrqu->pointer, wrqu->length))
-		return -EFAULT;
+		do { input_result = -EFAULT; goto out_input; } while (0);
 
 	_rtw_memset(extra, 0, wrqu->length);
 
@@ -2678,8 +2789,11 @@ exit:
 		rtw_mfree(setdata, 1024);
 
 	wrqu->length = strlen(extra);
-	return err;
+	do { input_result = err; goto out_input; } while (0);
 
+out_input:
+	kfree(input);
+	return input_result;
 }
 
 #if defined(CONFIG_RTL8723B)

@@ -42,4 +42,7 @@ source "drivers/net/wireless/rockchip_wlan/infineon/Kconfig"
 
 source "drivers/net/wireless/rockchip_wlan/rk915/Kconfig"
 
+source "drivers/net/wireless/rockchip_wlan/rtl8188eu/Kconfig"
+source "drivers/net/wireless/rockchip_wlan/rtl8188fu/Kconfig"
+
 endif # WL_ROCKCHIP
