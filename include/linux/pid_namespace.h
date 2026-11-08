@@ -18,6 +18,8 @@
 struct fs_pin;
 
 struct pid_namespace {
+	/* Opt-in input ABI for this container; init_pid_ns is never eligible. */
+	bool andr36oid_guest;
 	struct kref kref;
 	struct idr idr;
 	struct rcu_head rcu;
