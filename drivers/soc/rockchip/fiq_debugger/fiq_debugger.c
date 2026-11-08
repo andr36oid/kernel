@@ -1577,10 +1577,7 @@ static int fiq_debugger_probe(struct platform_device *pdev)
 			goto err_register_irq;
 		}
 
-		/* for irq-only mode, we want this irq to wake us up, if it
-		 * can.
-		 */
-		enable_irq_wake(state->uart_irq);
+		/* Floating debug RX on EE clones must not wake system sleep. */
 
 		ret = cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN,
 						"soc/fiq_debugger",

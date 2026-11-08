@@ -36,6 +36,8 @@ struct pwm_bl_data {
 	bool			legacy;
 	unsigned int		post_pwm_on_delay;
 	unsigned int		pwm_off_delay;
+	u64			kick_duty;
+	unsigned int		kick_ms;
 	int			(*notify)(struct device *,
 					  int brightness);
 	void			(*notify_after)(struct device *,
@@ -120,8 +122,19 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		brightness = pb->notify(pb->dev, brightness);
 
 	if (brightness > 0) {
+		u64 duty_cycle = compute_duty_cycle(pb, brightness);
+
 		pwm_get_state(pb->pwm, &state);
-		state.duty_cycle = compute_duty_cycle(pb, brightness);
+
+		if (!pb->enabled && pb->kick_ms && duty_cycle < pb->kick_duty) {
+			state.duty_cycle = pb->kick_duty;
+			pwm_apply_state(pb->pwm, &state);
+			pwm_backlight_power_on(pb);
+			msleep(pb->kick_ms);
+			/* Preserve enabled=true after the pulse, restoring only duty. */
+			pwm_get_state(pb->pwm, &state);
+		}
+		state.duty_cycle = duty_cycle;
 		pwm_apply_state(pb->pwm, &state);
 		pwm_backlight_power_on(pb);
 	} else {
@@ -612,6 +625,16 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	pb->lth_brightness = data->lth_brightness * (div_u64(state.period,
 				pb->scale));
+
+	if (node) {
+		u32 percent = 0;
+
+		of_property_read_u32(node, "andr36oid,kick-percent", &percent);
+		of_property_read_u32(node, "andr36oid,kick-ms", &pb->kick_ms);
+		pb->kick_duty = div_u64(state.period * min_t(u32, percent, 100), 100);
+		if (!pb->kick_duty)
+			pb->kick_ms = 0;
+	}
 
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = data->max_brightness;
