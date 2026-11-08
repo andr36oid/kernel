@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+# Keep in-tree/O= builds and clean independent of the standalone DKMS Makefile.
+ccflags-y += -DFAST_TX_STATUS -DKERNEL_IV_WAR -DRX_SENDUP_SYNC -DANDROID \
+	-DSIF_DSR_WAR -DHAS_INIT_DATA -DHAS_FW -DESP_USE_SDIO -DP2P_CONCURRENT
+obj-$(CONFIG_ESP8089) += esp8089.o
+esp8089-y := esp_init.o esp_debug.o sdio_sif_esp.o spi_sif_esp.o esp_io.o \
+	esp_file.o esp_main.o esp_sip.o esp_ext.o esp_ctrl.o esp_mac80211.o \
+	esp_utils.o esp_pm.o testmode.o
