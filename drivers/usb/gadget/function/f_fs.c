@@ -285,6 +285,8 @@ static int __ffs_ep0_queue_wait(struct ffs_data *ffs, char *data, size_t len)
 	}
 
 	req->zero     = len < le16_to_cpu(ffs->ev.setup.wLength);
+	req->defer_status = ffs->defer_out_status && !ffs->out_data_received &&
+		!(ffs->ev.setup.bRequestType & USB_DIR_IN) && len;
 
 	spin_unlock_irq(&ffs->ev.waitq.lock);
 
@@ -311,7 +313,12 @@ static int __ffs_ep0_queue_wait(struct ffs_data *ffs, char *data, size_t len)
 		return -EINTR;
 	}
 
-	ffs->setup_state = FFS_NO_SETUP;
+	if (req->defer_status && !req->status) {
+		ffs->out_data_received = true;
+	} else {
+		ffs->out_data_received = false;
+		ffs->setup_state = FFS_NO_SETUP;
+	}
 	return req->status ? req->status : req->actual;
 }
 
@@ -321,6 +328,7 @@ static int __ffs_ep0_stall(struct ffs_data *ffs)
 		pr_vdebug("ep0 stall\n");
 		usb_ep_set_halt(ffs->gadget->ep0);
 		ffs->setup_state = FFS_NO_SETUP;
+		ffs->out_data_received = false;
 		return -EL2HLT;
 	} else {
 		pr_debug("bogus ep0 stall!\n");
@@ -490,6 +498,7 @@ static ssize_t __ffs_ep0_read_events(struct ffs_data *ffs, char __user *buf,
 		if (events[i].type == FUNCTIONFS_SETUP) {
 			events[i].u.setup = ffs->ev.setup;
 			ffs->setup_state = FFS_SETUP_PENDING;
+			ffs->out_data_received = false;
 		}
 	} while (++i < n);
 
@@ -642,6 +651,13 @@ static long ffs_ep0_ioctl(struct file *file, unsigned code, unsigned long value)
 
 	ENTER();
 
+	if (code == FUNCTIONFS_DEFER_OUT_STATUS) {
+		/* This extension is implemented by the R36S dwc2 gadget driver. */
+		if (value != 1)
+			return -EINVAL;
+		ffs->defer_out_status = true;
+		return 0;
+	}
 	if (code == FUNCTIONFS_INTERFACE_REVMAP) {
 		struct ffs_function *func = ffs->func;
 		ret = func ? ffs_func_revmap_intf(func, value) : -ENODEV;
@@ -2065,6 +2081,26 @@ typedef int (*ffs_os_desc_callback)(enum ffs_os_desc_type entity,
 				    struct usb_os_desc_header *h, void *data,
 				    unsigned len, void *priv);
 
+/* The wired XUSB gamepad descriptor shares HID's type but not its layout. */
+static bool ffs_xinput_desc(const struct usb_descriptor_header *desc)
+{
+	static const u8 gamepad[] = {
+		17, 0x21, 0, 1, 1, 0x25, 0x81, 0x14, 0, 0, 0, 0,
+		0x13, 2, 8, 0, 0
+	};
+
+	const u8 *data = (const u8 *)desc;
+
+	return desc->bLength == sizeof(gamepad) &&
+		!memcmp(data, gamepad, 6) &&
+		!memcmp(data + 7, gamepad + 7, 6) &&
+		!memcmp(data + 14, gamepad + 14, 3) &&
+		(data[6] & USB_DIR_IN) &&
+		(data[6] & USB_ENDPOINT_NUMBER_MASK) &&
+		!(data[13] & USB_DIR_IN) &&
+		(data[13] & USB_ENDPOINT_NUMBER_MASK);
+}
+
 static int __must_check ffs_do_single_desc(char *data, unsigned len,
 					   ffs_entity_callback entity,
 					   void *priv, int *current_class)
@@ -2140,7 +2176,9 @@ static int __must_check ffs_do_single_desc(char *data, unsigned len,
 		break;
 
 	case USB_TYPE_CLASS | 0x01:
-                if (*current_class == USB_INTERFACE_CLASS_HID) {
+		if (*current_class == USB_CLASS_VENDOR_SPEC && ffs_xinput_desc(_ds))
+			break;
+		if (*current_class == USB_INTERFACE_CLASS_HID) {
 			pr_vdebug("hid descriptor\n");
 			if (length != sizeof(struct hid_descriptor))
 				goto inv_length;
@@ -2156,6 +2194,38 @@ static int __must_check ffs_do_single_desc(char *data, unsigned len,
 			return -EINVAL;
 		}
 
+	case 0x24: {
+		u8 *ds = (u8 *)_ds;
+
+		/* CDC ACM functional descriptors and their interface references. */
+		if (length < 3)
+			goto inv_length;
+		switch (ds[2]) {
+		case 0:
+			if (length != 5)
+				goto inv_length;
+			break;
+		case 1:
+			if (length != 5)
+				goto inv_length;
+			__entity(INTERFACE, ds[4]);
+			break;
+		case 2:
+			if (length != 4)
+				goto inv_length;
+			break;
+		case 6:
+			if (length != 5)
+				goto inv_length;
+			__entity(INTERFACE, ds[3]);
+			__entity(INTERFACE, ds[4]);
+			break;
+		default:
+			return -EINVAL;
+		}
+		break;
+	}
+
 	case USB_DT_OTG:
 		if (length != sizeof(struct usb_otg_descriptor))
 			goto inv_length;
@@ -2166,6 +2236,7 @@ static int __must_check ffs_do_single_desc(char *data, unsigned len,
 		pr_vdebug("interface association descriptor\n");
 		if (length != sizeof *ds)
 			goto inv_length;
+		__entity(INTERFACE, ds->bFirstInterface);
 		if (ds->iFunction)
 			__entity(STRING, ds->iFunction);
 	}
@@ -2960,7 +3031,22 @@ static int __ffs_func_bind_do_nums(enum ffs_entity_type type, u8 *valuep,
 	switch (type) {
 	default:
 	case FFS_DESCRIPTOR:
-		/* Handled in previous pass by __ffs_func_bind_do_descs() */
+		/* Keep XUSB's embedded endpoint addresses in step with autoconfig. */
+		if (desc && ffs_xinput_desc(desc)) {
+			u8 *data = (u8 *)desc;
+			unsigned int i;
+			static const u8 offsets[] = { 6, 13 };
+
+			for (i = 0; i < ARRAY_SIZE(offsets); i++) {
+				int ep = ffs_ep_addr2idx(func->ffs, data[offsets[i]]) - 1;
+				struct usb_endpoint_descriptor **descs;
+
+				if (ep < 0 || !func->eps[ep].ep)
+					return -EINVAL;
+				descs = func->eps[ep].descs;
+				data[offsets[i]] = descs[descs[0] ? 0 : 1]->bEndpointAddress;
+			}
+		}
 		return 0;
 
 	case FFS_INTERFACE:
