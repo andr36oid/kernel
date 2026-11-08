@@ -390,6 +390,7 @@ struct mmc_host {
 #else
 #define MMC_CAP2_CRYPTO		0
 #endif
+#define MMC_CAP2_WIFI_RK915	(1 << 28)	/* Host has a Rockchip RK915 SDIO Wi-Fi chip */
 
 	int			fixed_drv_type;	/* fixed driver type for non-removable media */
 
