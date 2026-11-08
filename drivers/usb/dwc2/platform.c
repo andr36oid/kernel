@@ -702,6 +702,10 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 	bool is_device_mode;
 	int ret = 0;
 
+	/* A failed reset leaves the core CSRs unsafe to touch. */
+	if (dwc2->core_reset_failed)
+		return 0;
+
 	if (!dwc2->ll_hw_enabled)
 		return 0;
 
@@ -756,6 +760,10 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
 	unsigned long flags;
 	int ret = 0;
+
+	/* A failed reset leaves the core CSRs unsafe to touch. */
+	if (dwc2->core_reset_failed)
+		return 0;
 
 	if (!dwc2->ll_hw_enabled)
 		return 0;

@@ -4437,6 +4437,27 @@ static int _dwc2_hcd_resume(struct usb_hcd *hcd)
 		spin_lock_irqsave(&hsotg->lock, flags);
 	}
 
+	/*
+	 * The USB power domain can be switched off during system sleep.
+	 * The core then comes back in its reset state (no interrupts, port
+	 * not powered) and nothing on the port works until a restart. The
+	 * grf keeps the port forced to host, so the device mode branch
+	 * above does not catch it. Set the host up again, like that branch.
+	 */
+	if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
+	    !(dwc2_readl(hsotg, GAHBCFG) & GAHBCFG_GLBL_INTR_EN)) {
+		spin_unlock_irqrestore(&hsotg->lock, flags);
+		dev_info(hsotg->dev, "core lost its state in sleep, setting up the host again\n");
+		msleep(200);
+		hsotg->op_state = OTG_STATE_A_HOST;
+		ret = dwc2_core_init(hsotg, true);
+		if (ret)
+			return ret;
+		dwc2_enable_global_interrupts(hsotg);
+		dwc2_hcd_start(hsotg);
+		return 0;
+	}
+
 	if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_PARTIAL) {
 		/*
 		 * Set HW accessible bit before powering on the controller
@@ -4742,6 +4763,7 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
 	int rc;
 	unsigned long flags;
+	int urb_status;
 
 	dev_dbg(hsotg->dev, "DWC OTG HCD URB Dequeue\n");
 	dwc2_dump_urb_info(hcd, urb, "urb_dequeue");
@@ -4766,11 +4788,12 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 
 	/* Higher layer software sets URB status */
 	spin_unlock(&hsotg->lock);
+	urb_status = urb->status;
 	usb_hcd_giveback_urb(hcd, urb, status);
 	spin_lock(&hsotg->lock);
 
 	dev_dbg(hsotg->dev, "Called usb_hcd_giveback_urb()\n");
-	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb->status);
+	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb_status);
 out:
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 
