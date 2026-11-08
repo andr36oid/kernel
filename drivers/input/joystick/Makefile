@@ -24,6 +24,7 @@ obj-$(CONFIG_JOYSTICK_INTERACT)		+= interact.o
 obj-$(CONFIG_JOYSTICK_JOYDUMP)		+= joydump.o
 obj-$(CONFIG_JOYSTICK_MAGELLAN)		+= magellan.o
 obj-$(CONFIG_JOYSTICK_MAPLE)		+= maplecontrol.o
+obj-$(CONFIG_JOYSTICK_ADC_LEGACY) += adc-joystick-legacy.o
 obj-$(CONFIG_JOYSTICK_ODROIDGO3)	+= odroidgo3-joypad.o
 obj-$(CONFIG_JOYSTICK_PSXPAD_SPI)	+= psxpad-spi.o
 obj-$(CONFIG_JOYSTICK_PXRC)		+= pxrc.o

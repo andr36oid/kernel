@@ -180,6 +180,10 @@ static int adc_joystick_probe(struct platform_device *pdev)
 	int bits;
 	int i;
 
+	/* The legacy R36 binding uses named channels and flat range properties. */
+	if (of_device_is_compatible(dev->of_node, "play_joystick"))
+		return -ENODEV;
+
 	joy = devm_kzalloc(dev, sizeof(*joy), GFP_KERNEL);
 	if (!joy)
 		return -ENOMEM;
