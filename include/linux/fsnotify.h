@@ -302,11 +302,20 @@ static inline void fsnotify_modify(struct file *file)
  */
 static inline void fsnotify_open(struct file *file)
 {
+	const struct path *path = &file->f_path;
+	struct path lower_path;
 	__u32 mask = FS_OPEN;
 
 	if (file->f_flags & __FMODE_EXEC)
 		mask |= FS_OPEN_EXEC;
 
+	if (!(file->f_mode & (FMODE_NONOTIFY | FMODE_PATH)) &&
+	    path->dentry->d_op && path->dentry->d_op->d_canonical_path) {
+		path->dentry->d_op->d_canonical_path(path, &lower_path);
+		fsnotify_parent(lower_path.dentry, mask, &lower_path,
+				FSNOTIFY_EVENT_PATH);
+		path_put(&lower_path);
+	}
 	fsnotify_file(file, mask);
 }
 
