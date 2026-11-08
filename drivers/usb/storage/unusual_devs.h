@@ -1497,26 +1497,14 @@ UNUSUAL_DEV( 0x0bc2, 0x3332, 0x0000, 0x9999,
 		US_FL_NO_WP_DETECT ),
 
 /*
- * Reported by Zenm Chen <zenmchen@gmail.com>
- * Ignore driver CD mode, otherwise usb_modeswitch may fail to switch
- * the device into Wi-Fi mode.
+ * Realtek RTL8811CU/RTL8821CU/RTL8188GU based WiFi dongles show up as a
+ * driver CD first and need an eject to switch to WiFi mode
  */
-UNUSUAL_DEV( 0x0bda, 0x1a2b, 0x0000, 0xffff,
+UNUSUAL_DEV(  0x0bda, 0x1a2b, 0x0000, 0x9999,
 		"Realtek",
-		"DISK",
-		USB_SC_DEVICE, USB_PR_DEVICE, NULL,
-		US_FL_IGNORE_DEVICE ),
-
-/*
- * Reported by Zenm Chen <zenmchen@gmail.com>
- * Ignore driver CD mode, otherwise usb_modeswitch may fail to switch
- * the device into Wi-Fi mode.
- */
-UNUSUAL_DEV( 0x0bda, 0xa192, 0x0000, 0xffff,
-		"Realtek",
-		"DISK",
-		USB_SC_DEVICE, USB_PR_DEVICE, NULL,
-		US_FL_IGNORE_DEVICE ),
+		"WiFi driver CD",
+		USB_SC_DEVICE, USB_PR_BULK, usb_stor_wifi_eject_init,
+		0 ),
 
 UNUSUAL_DEV(  0x0d49, 0x7310, 0x0000, 0x9999,
 		"Maxtor",
@@ -1604,6 +1592,13 @@ UNUSUAL_DEV( 0x0e21, 0x0520, 0x0100, 0x0100,
 		"iAUDIO M5",
 		USB_SC_DEVICE, USB_PR_BULK, NULL,
 		US_FL_NEED_OVERRIDE ),
+
+/* MediaTek MT7601U based WiFi dongles, same story as Realtek 0bda:1a2b */
+UNUSUAL_DEV(  0x0e8d, 0x2870, 0x0000, 0x9999,
+		"MediaTek",
+		"WiFi driver CD",
+		USB_SC_DEVICE, USB_PR_BULK, usb_stor_wifi_eject_init,
+		0 ),
 
 /* Submitted by Antoine Mairesse <antoine.mairesse@free.fr> */
 UNUSUAL_DEV( 0x0ed1, 0x6660, 0x0100, 0x0300,
@@ -2444,6 +2439,23 @@ UNUSUAL_DEV(0x4971, 0x8024, 0x0000, 0x9999,
 		USB_SC_DEVICE, USB_PR_DEVICE, NULL,
 		US_FL_ALWAYS_SYNC),
 
+/* AICSemi AIC8800 based WiFi 6 dongles, same story as Realtek 0bda:1a2b */
+UNUSUAL_DEV(  0xa69c, 0x5721, 0x0000, 0x9999,
+		"AICSemi",
+		"WiFi driver CD",
+		USB_SC_DEVICE, USB_PR_BULK, usb_stor_wifi_eject_init,
+		0 ),
+UNUSUAL_DEV(  0xa69c, 0x5722, 0x0000, 0x9999,
+		"AICSemi",
+		"WiFi driver CD",
+		USB_SC_DEVICE, USB_PR_BULK, usb_stor_wifi_eject_init,
+		0 ),
+UNUSUAL_DEV(  0xa69c, 0x572a, 0x0000, 0x9999,
+		"AICSemi",
+		"WiFi driver CD",
+		USB_SC_DEVICE, USB_PR_BULK, usb_stor_wifi_eject_init,
+		0 ),
+
 /*
  * Nick Bowler <nbowler@elliptictech.com>
  * SCSI stack spams (otherwise harmless) error messages.
@@ -2477,6 +2489,22 @@ UNUSUAL_DEV( 0xed10, 0x7636, 0x0001, 0x0001,
 		"TGE",
 		"Digital MP3 Audio Player",
 		USB_SC_DEVICE, USB_PR_DEVICE, NULL, US_FL_NOT_LOCKABLE ),
+
+/* Modems and dongles in virtual CD-ROM mode, see unusual_modeswitch.h */
+#define MODESWITCH_EJECT(id_vendor, id_product) \
+	UNUSUAL_DEV(id_vendor, id_product, 0x0000, 0xffff, \
+		"Modem", "CD-ROM mode", USB_SC_DEVICE, USB_PR_BULK, \
+		usb_stor_modeswitch_init, 0),
+#define MODESWITCH_MSG(id_vendor, id_product, cbw) \
+	MODESWITCH_EJECT(id_vendor, id_product)
+#define MODESWITCH_OPTION(id_vendor, id_product) \
+	UNUSUAL_DEV(id_vendor, id_product, 0x0000, 0xffff, \
+		"Option", "CD-ROM mode", USB_SC_DEVICE, USB_PR_DEVICE, \
+		option_ms_init, 0),
+#include "unusual_modeswitch.h"
+#undef MODESWITCH_EJECT
+#undef MODESWITCH_MSG
+#undef MODESWITCH_OPTION
 
 /* Unusual uas devices */
 #if IS_ENABLED(CONFIG_USB_UAS)
