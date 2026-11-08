@@ -1661,7 +1661,9 @@ static void vop_crtc_atomic_disable(struct drm_crtc *crtc,
 	struct rockchip_crtc_state *s = to_rockchip_crtc_state(crtc->state);
 	int sys_status = drm_crtc_index(crtc) ?
 				SYS_STATUS_LCDC1 : SYS_STATUS_LCDC0;
-	struct drm_display_mode *mode = &old_state->adjusted_mode;
+	/* Loader protection disables the boot display without an old state. */
+	struct drm_display_mode *mode = old_state ?
+		&old_state->adjusted_mode : &crtc->state->adjusted_mode;
 	int hold_time, vrefresh;
 
 	WARN_ON(vop->event);
