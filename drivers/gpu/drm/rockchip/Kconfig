@@ -166,3 +166,5 @@ config ROCKCHIP_DRM_ANDROID_LEGACY
 	help
 	  Expose ZPOS, GLOBAL_ALPHA, BLEND_MODE and SHARE_FLAGS alongside
 	  standard DRM plane properties for the Android 11 Rockchip HWC.
+	  Also acknowledge the legacy SHARE_PLANES client capability on
+	  Rockchip DRM devices, as the Android 4.19 driver did.

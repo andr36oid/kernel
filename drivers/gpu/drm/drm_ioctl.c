@@ -324,6 +324,13 @@ drm_setclientcap(struct drm_device *dev, void *data, struct drm_file *file_priv)
 		return -EOPNOTSUPP;
 
 	switch (req->capability) {
+#ifdef CONFIG_ROCKCHIP_DRM_ANDROID_LEGACY
+	case DRM_CLIENT_CAP_SHARE_PLANES:
+		/* The 4.19 Rockchip driver acknowledges this without changing state. */
+		if (strcmp(dev->driver->name, "rockchip"))
+			return -EINVAL;
+		break;
+#endif
 	case DRM_CLIENT_CAP_STEREO_3D:
 		if (req->value > 1)
 			return -EINVAL;

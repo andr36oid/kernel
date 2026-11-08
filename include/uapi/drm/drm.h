@@ -698,6 +698,9 @@ struct drm_get_cap {
  */
 #define DRM_CLIENT_CAP_WRITEBACK_CONNECTORS	5
 
+/* Legacy Rockchip Android 4.19 HWC acknowledgement; no per-file state. */
+#define DRM_CLIENT_CAP_SHARE_PLANES	6
+
 /** DRM_IOCTL_SET_CLIENT_CAP ioctl argument type */
 struct drm_set_client_cap {
 	__u64 capability;
