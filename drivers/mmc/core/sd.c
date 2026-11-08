@@ -1091,10 +1091,15 @@ retry:
 	 * If the card has not been power cycled, it may still be using 1.8V
 	 * signaling. Detect that situation and try to initialize a UHS-I (1.8V)
 	 * transfer mode.
+	 *
+	 * Hosts whose I/O supply is fixed at 1.8V (R36S, RG351V) are already
+	 * at 1.8V here, so also check that the card skipped S18A. Without
+	 * that such a card drops to high speed after resume or a warm reset.
 	 */
 	if (!v18_fixup_failed && !mmc_host_is_spi(host) && mmc_host_uhs(host) &&
 	    mmc_sd_card_using_v18(card) &&
-	    host->ios.signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
+	    (host->ios.signal_voltage != MMC_SIGNAL_VOLTAGE_180 ||
+	     !(rocr & SD_ROCR_S18A))) {
 		if (mmc_host_set_uhs_voltage(host) ||
 		    mmc_sd_init_uhs_card(card)) {
 			v18_fixup_failed = true;
@@ -1306,6 +1311,21 @@ static int _mmc_sd_resume(struct mmc_host *host)
 
 	mmc_power_up(host, host->card->ocr);
 	err = mmc_sd_init_card(host, host->card->ocr, host->card);
+	if (err) {
+		/*
+		 * A card still busy from before the suspend can make the
+		 * first command time out. Retry once after a power cycle:
+		 * a failed resume is reported as success, leaving queued
+		 * requests to hang forever.
+		 */
+		pr_warn("%s: resume failed (%d), retrying after a power cycle\n",
+			mmc_hostname(host), err);
+		mmc_power_cycle(host, host->card->ocr);
+		err = mmc_sd_init_card(host, host->card->ocr, host->card);
+		if (err)
+			pr_err("%s: card could not be re-initialised on resume (%d)\n",
+			       mmc_hostname(host), err);
+	}
 	mmc_card_clr_suspended(host->card);
 
 out:
