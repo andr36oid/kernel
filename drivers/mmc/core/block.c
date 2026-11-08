@@ -3237,7 +3237,7 @@ static void mmc_blk_remove(struct mmc_card *card)
 	mmc_blk_remove_debugfs(card, md);
 
 	#if defined(CONFIG_MMC_DW_ROCKCHIP)
-	if (card->type == MMC_TYPE_MMC)
+	if (this_card == card)
 		this_card = NULL;
 	#endif
 
