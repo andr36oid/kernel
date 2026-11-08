@@ -79,6 +79,64 @@ struct rk_mcu_sleep_tags {
 
 struct rk_sleep_config *sleep_config;
 
+/* Runtime sleep-policy ABI used by Settings and the subsystem broker. */
+struct sleep_cfg {
+	u32 ctrl;
+	u32 dt;
+	u32 *active;
+};
+
+static struct sleep_cfg sleep_mode_cfg = { .ctrl = SUSPEND_MODE_CONFIG };
+static struct sleep_cfg sleep_wakeup_cfg = { .ctrl = WKUP_SOURCE_CONFIG };
+
+static int sleep_cfg_set(const char *val, const struct kernel_param *kp)
+{
+	struct sleep_cfg *cfg = kp->arg;
+	u32 value;
+	int ret;
+
+	if (!cfg->active)
+		return -ENODEV;
+	if (sysfs_streq(val, "default") || sysfs_streq(val, ""))
+		value = cfg->dt;
+	else {
+		ret = kstrtou32(val, 0, &value);
+		if (ret)
+			return ret;
+	}
+	lock_system_sleep();
+	ret = sip_smc_set_suspend_mode(cfg->ctrl, value, 0);
+	if (!ret) {
+		/* 5.10 replays this array on every suspend; retain the override. */
+		WRITE_ONCE(*cfg->active, value);
+		pr_info("rockchip-suspend: %s = 0x%x (DTB: 0x%x)\n",
+			kp->name, value, cfg->dt);
+	}
+	unlock_system_sleep();
+	return ret ? -EIO : 0;
+}
+
+static int sleep_cfg_get(char *buf, const struct kernel_param *kp)
+{
+	struct sleep_cfg *cfg = kp->arg;
+	u32 value = cfg->active ? READ_ONCE(*cfg->active) : 0;
+
+	return sprintf(buf, "0x%x default 0x%x\n", value, cfg->dt);
+}
+
+static const struct kernel_param_ops sleep_cfg_ops = {
+	.set = sleep_cfg_set,
+	.get = sleep_cfg_get,
+};
+module_param_cb(sleep_mode, &sleep_cfg_ops, &sleep_mode_cfg, 0644);
+module_param_cb(sleep_wakeup, &sleep_cfg_ops, &sleep_wakeup_cfg, 0644);
+
+static void sleep_cfg_init(struct sleep_cfg *cfg, u32 *active)
+{
+	cfg->dt = *active;
+	cfg->active = active;
+}
+
 static const struct of_device_id pm_match_table[] = {
 	{ .compatible = "rockchip,pm-config",},
 	{ .compatible = "rockchip,pm-px30",},
@@ -424,6 +482,7 @@ static int pm_config_probe(struct platform_device *pdev)
 	int i = 0;
 	int length;
 	int ret;
+	bool mode_known = false, wakeup_known = false;
 
 	match_id = of_match_node(pm_match_table, pdev->dev.of_node);
 	if (!match_id)
@@ -449,15 +508,19 @@ static int pm_config_probe(struct platform_device *pdev)
 				       "rockchip,sleep-mode-config",
 				       &config->mode_config, 1))
 		dev_warn(&pdev->dev, "not set sleep mode config\n");
-	else
+	else {
 		sip_smc_set_suspend_mode(SUSPEND_MODE_CONFIG, config->mode_config, 0);
+		mode_known = true;
+	}
 
 	if (of_property_read_u32_array(node,
 				       "rockchip,wakeup-config",
 				       &config->wakeup_config, 1))
 		dev_warn(&pdev->dev, "not set wakeup-config\n");
-	else
+	else {
 		sip_smc_set_suspend_mode(WKUP_SOURCE_CONFIG, config->wakeup_config, 0);
+		wakeup_known = true;
+	}
 
 	if (of_property_read_u32_array(node,
 				       "rockchip,pwm-regulator-config",
@@ -541,6 +604,10 @@ static int pm_config_probe(struct platform_device *pdev)
 	}
 #endif
 
+	if (mode_known)
+		sleep_cfg_init(&sleep_mode_cfg, &sleep_config[RK_PM_MEM].mode_config);
+	if (wakeup_known)
+		sleep_cfg_init(&sleep_wakeup_cfg, &sleep_config[RK_PM_MEM].wakeup_config);
 	return 0;
 }
 
@@ -563,17 +630,17 @@ static int pm_config_prepare(struct device *dev)
 
 	config = &sleep_config[state];
 
-	if (config->mode_config)
+	if (config->mode_config || (state == RK_PM_MEM && sleep_mode_cfg.active))
 		sip_smc_set_suspend_mode(SUSPEND_MODE_CONFIG,
 					 config->mode_config, 0);
-	else if (def_config->mode_config)
+	else if (def_config->mode_config || sleep_mode_cfg.active)
 		sip_smc_set_suspend_mode(SUSPEND_MODE_CONFIG,
 					 def_config->mode_config, 0);
 
-	if (config->wakeup_config)
+	if (config->wakeup_config || (state == RK_PM_MEM && sleep_wakeup_cfg.active))
 		sip_smc_set_suspend_mode(WKUP_SOURCE_CONFIG,
 					 config->wakeup_config, 0);
-	else if (def_config->wakeup_config)
+	else if (def_config->wakeup_config || sleep_wakeup_cfg.active)
 		sip_smc_set_suspend_mode(WKUP_SOURCE_CONFIG,
 					 def_config->wakeup_config, 0);
 
