@@ -28,7 +28,6 @@
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/mutex.h>
-#include <linux/reservation.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -248,7 +247,11 @@ kbase_dma_fence_add_reservation_callback(struct kbase_jd_atom *katom,
 	unsigned int shared_count = 0;
 	int err, i;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 	err = reservation_object_get_fences_rcu(resv,
+#else
+	err = dma_resv_get_fences_rcu(resv,
+#endif
 						&excl_fence,
 						&shared_count,
 						&shared_fences);
@@ -366,7 +369,11 @@ int kbase_dma_fence_wait(struct kbase_jd_atom *katom,
 		struct dma_resv *obj = info->resv_objs[i];
 #endif
 		if (!test_bit(i, info->dma_fence_excl_bitmap)) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 			err = reservation_object_reserve_shared(obj);
+#else
+			err = dma_resv_reserve_shared(obj, 1);
+#endif
 			if (err) {
 				dev_err(katom->kctx->kbdev->dev,
 					"Error %d reserving space for shared fence.\n", err);
@@ -380,7 +387,11 @@ int kbase_dma_fence_wait(struct kbase_jd_atom *katom,
 				goto end;
 			}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 			reservation_object_add_shared_fence(obj, fence);
+#else
+			dma_resv_add_shared_fence(obj, fence);
+#endif
 		} else {
 			err = kbase_dma_fence_add_reservation_callback(katom, obj, true);
 			if (err) {
@@ -389,7 +400,11 @@ int kbase_dma_fence_wait(struct kbase_jd_atom *katom,
 				goto end;
 			}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 			reservation_object_add_excl_fence(obj, fence);
+#else
+			dma_resv_add_excl_fence(obj, fence);
+#endif
 		}
 	}
 

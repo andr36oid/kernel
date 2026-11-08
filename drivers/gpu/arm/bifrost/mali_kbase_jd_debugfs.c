@@ -74,12 +74,12 @@ static void kbase_jd_debugfs_fence_info(struct kbase_jd_atom *atom,
 
 			seq_printf(sfile,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
-					"Sd(%u#%u: %s) ",
+					"Sd(%u#%llu: %s) ",
 #else
-					"Sd(%llu#%u: %s) ",
+					"Sd(%llu#%llu: %s) ",
 #endif
 					fence->context,
-					fence->seqno,
+					(unsigned long long)fence->seqno,
 					dma_fence_is_signaled(fence) ?
 						"signaled" : "active");
 		}
@@ -94,12 +94,12 @@ static void kbase_jd_debugfs_fence_info(struct kbase_jd_atom *atom,
 
 			seq_printf(sfile,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
-					"Wd(%u#%u: %s) ",
+					"Wd(%u#%llu: %s) ",
 #else
-					"Wd(%llu#%u: %s) ",
+					"Wd(%llu#%llu: %s) ",
 #endif
 					fence->context,
-					fence->seqno,
+					(unsigned long long)fence->seqno,
 					dma_fence_is_signaled(fence) ?
 						"signaled" : "active");
 		}

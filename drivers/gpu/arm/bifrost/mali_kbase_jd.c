@@ -1249,12 +1249,15 @@ int kbase_jd_submit(struct kbase_context *kctx,
 	latest_flush = kbase_backend_get_current_flush_id(kbdev);
 
 	for (i = 0; i < nr_atoms; i++) {
-		struct base_jd_atom user_atom;
+		struct base_jd_atom user_atom = { 0 };
 		struct base_jd_fragment user_jc_incr;
 		struct kbase_jd_atom *katom;
 
 		if (unlikely(jd_atom_is_v2)) {
-			if (copy_from_user(&user_atom.jc, user_addr, sizeof(struct base_jd_atom_v2)) != 0) {
+			/* Legacy v2 atoms end before renderpass_id; do not read
+			 * beyond their submitted stride, even for the last atom.
+			 */
+			if (copy_from_user(&user_atom.jc, user_addr, stride) != 0) {
 				dev_err(kbdev->dev,
 					"Invalid atom address %p passed to job_submit\n",
 					user_addr);
