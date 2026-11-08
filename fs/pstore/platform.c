@@ -519,6 +519,8 @@ static void pstore_register_console(void)
 	 * calls may have changed settings (specifically CON_ENABLED).
 	 */
 	pstore_console.flags = CON_PRINTBUFFER | CON_ENABLED | CON_ANYTIME;
+	if (IS_ENABLED(CONFIG_PSTORE_CONSOLE_FORCE))
+		pstore_console.flags |= CON_PSTORE;
 	register_console(&pstore_console);
 }
 

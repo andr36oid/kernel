@@ -1250,6 +1250,22 @@ module_param(ignore_loglevel, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ignore_loglevel,
 		 "ignore loglevel setting (prints all kernel messages to the console)");
 
+#ifdef CONFIG_PSTORE_CONSOLE_FORCE
+static bool __read_mostly pstore_con_force =
+	IS_ENABLED(CONFIG_PSTORE_CONSOLE_FORCE_ON);
+
+static int __init pstore_con_force_setup(char *str)
+{
+	return kstrtobool(str, &pstore_con_force);
+}
+early_param("pstore_con_force", pstore_con_force_setup);
+module_param(pstore_con_force, bool, 0644);
+MODULE_PARM_DESC(pstore_con_force, "Keep all loglevels in the pstore console");
+static bool pstore_force_enabled(void) { return READ_ONCE(pstore_con_force); }
+#else
+static bool pstore_force_enabled(void) { return false; }
+#endif
+
 static bool suppress_message_printing(int level)
 {
 	return (level >= console_loglevel && !ignore_loglevel);
@@ -1905,7 +1921,7 @@ static int console_trylock_spinning(void)
  * log_buf[start] to log_buf[end - 1].
  * The console_lock must be held.
  */
-static void call_console_drivers(const char *ext_text, size_t ext_len,
+static void call_console_drivers(int level, const char *ext_text, size_t ext_len,
 				 const char *text, size_t len)
 {
 	static char dropped_text[64];
@@ -1928,6 +1944,9 @@ static void call_console_drivers(const char *ext_text, size_t ext_len,
 		if (exclusive_console && con != exclusive_console)
 			continue;
 		if (!(con->flags & CON_ENABLED))
+			continue;
+		if (suppress_message_printing(level) &&
+		    !(pstore_force_enabled() && (con->flags & CON_PSTORE)))
 			continue;
 		if (!con->write)
 			continue;
@@ -2168,9 +2187,10 @@ static ssize_t msg_print_ext_body(char *buf, size_t size,
 				  struct dev_printk_info *dev_info) { return 0; }
 static void console_lock_spinning_enable(void) { }
 static int console_lock_spinning_disable_and_check(void) { return 0; }
-static void call_console_drivers(const char *ext_text, size_t ext_len,
+static void call_console_drivers(int level, const char *ext_text, size_t ext_len,
 				 const char *text, size_t len) {}
 static bool suppress_message_printing(int level) { return false; }
+static bool pstore_force_enabled(void) { return false; }
 
 #endif /* CONFIG_PRINTK */
 
@@ -2523,7 +2543,7 @@ skip:
 			console_seq = r.info->seq;
 		}
 
-		if (suppress_message_printing(r.info->level)) {
+		if (suppress_message_printing(r.info->level) && !pstore_force_enabled()) {
 			/*
 			 * Skip record we have buffered and already printed
 			 * directly to the console when we received it, and
@@ -2568,7 +2588,7 @@ skip:
 		console_lock_spinning_enable();
 
 		stop_critical_timings();	/* don't trace print latency */
-		call_console_drivers(ext_text, ext_len, text, len);
+		call_console_drivers(r.info->level, ext_text, ext_len, text, len);
 		start_critical_timings();
 
 		if (console_lock_spinning_disable_and_check()) {
