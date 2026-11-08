@@ -125,4 +125,16 @@ config VIRT_WIFI
 	  This option adds support for ethernet connections to appear as if they
 	  are wifi connections through a special rtnetlink device.
 
+source "drivers/net/wireless/rtl8812au/Kconfig"
+source "drivers/net/wireless/rtl8814au/Kconfig"
+source "drivers/net/wireless/rtl8821au/Kconfig"
+source "drivers/net/wireless/rtl8821cu/Kconfig"
+source "drivers/net/wireless/rtl88x2bu/Kconfig"
+source "drivers/net/wireless/rtl8192eu/Kconfig"
+source "drivers/net/wireless/rtl8192fu/Kconfig"
+source "drivers/net/wireless/rtl8188gu/Kconfig"
+source "drivers/net/wireless/rtl8852bu/Kconfig"
+source "drivers/net/wireless/aic8800/Kconfig"
+source "drivers/net/wireless/esp8089/Kconfig"
+
 endif # WLAN

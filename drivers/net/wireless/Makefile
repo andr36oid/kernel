@@ -31,3 +31,15 @@ obj-$(CONFIG_MAC80211_HWSIM)	+= mac80211_hwsim.o
 
 obj-$(CONFIG_VIRT_WIFI)	+= virt_wifi.o
 obj-$(CONFIG_WL_ROCKCHIP)	+= rockchip_wlan/
+
+obj-$(CONFIG_ESP8089) 		+= esp8089/
+obj-$(CONFIG_RTL8812AU)           += rtl8812au/
+obj-$(CONFIG_RTL8814AU)           += rtl8814au/
+obj-$(CONFIG_RTL8821AU)           += rtl8821au/
+obj-$(CONFIG_RTL8821CU)           += rtl8821cu/
+obj-$(CONFIG_RTL8822BU)           += rtl88x2bu/
+obj-$(CONFIG_RTL8192EU)           += rtl8192eu/
+obj-$(CONFIG_RTL8192FU)           += rtl8192fu/
+obj-$(CONFIG_RTL8188GU)           += rtl8188gu/
+obj-$(CONFIG_RTL8852BU)           += rtl8852bu/
+obj-$(CONFIG_AIC_WLAN_SUPPORT)    += aic8800/
