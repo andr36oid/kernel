@@ -46,7 +46,7 @@
 #include <mali_kbase_hwaccess_instr.h>
 #endif
 #include <mali_kbase_reset_gpu.h>
-#include <uapi/gpu/arm/bifrost/mali_kbase_ioctl.h>
+#include <uapi/gpu/arm/bifrost_g7p1/mali_kbase_ioctl.h>
 #if !MALI_USE_CSF
 #include "mali_kbase_kinstr_jm.h"
 #endif

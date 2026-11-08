@@ -22,7 +22,7 @@
 #ifndef _KBASE_GPU_REGMAP_H_
 #define _KBASE_GPU_REGMAP_H_
 
-#include <uapi/gpu/arm/bifrost/gpu/mali_kbase_gpu_regmap.h>
+#include <uapi/gpu/arm/bifrost_g7p1/gpu/mali_kbase_gpu_regmap.h>
 
 /* Include POWER_CHANGED_SINGLE in debug builds for use in irq latency test. */
 #ifdef CONFIG_MALI_BIFROST_DEBUG

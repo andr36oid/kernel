@@ -22,4 +22,8 @@ obj-$(CONFIG_MALI_MIDGARD) += midgard/
 
 obj-$(CONFIG_MALI400)      += mali400/
 
+ifeq ($(CONFIG_MALI_BIFROST_G7P1_FOR_ANDROID),y)
+obj-$(CONFIG_MALI_BIFROST) += bifrost_g7p1/
+else
 obj-$(CONFIG_MALI_BIFROST) += bifrost/
+endif

@@ -31,7 +31,7 @@
 #endif
 
 #include <linux/kref.h>
-#include <uapi/gpu/arm/bifrost/mali_base_kernel.h>
+#include <uapi/gpu/arm/bifrost_g7p1/mali_base_kernel.h>
 #include <mali_kbase_hw.h>
 #include "mali_kbase_pm.h"
 #include "mali_kbase_defs.h"

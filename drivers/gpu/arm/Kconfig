@@ -22,4 +22,16 @@ source "drivers/gpu/arm/mali400/mali/Kconfig"
 
 source "drivers/gpu/arm/midgard/Kconfig"
 
+config MALI_BIFROST_G7P1_FOR_ANDROID
+	bool "Use g7p1-01bet0 Bifrost for matched Android Vulkan userspace"
+	default n
+	help
+	  Select UK11.31 Job Manager instead of g2p0. This requires matching
+	  ARMv8.0 g7p1 userspace; the shipping GLES variant uses g2p0.
+
+if MALI_BIFROST_G7P1_FOR_ANDROID
+source "drivers/gpu/arm/bifrost_g7p1/Kconfig"
+endif
+if !MALI_BIFROST_G7P1_FOR_ANDROID
 source "drivers/gpu/arm/bifrost/Kconfig"
+endif

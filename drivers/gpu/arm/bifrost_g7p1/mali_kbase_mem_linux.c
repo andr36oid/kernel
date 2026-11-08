@@ -42,7 +42,7 @@
 #include <mali_kbase.h>
 #include <mali_kbase_mem_linux.h>
 #include <tl/mali_kbase_tracepoints.h>
-#include <uapi/gpu/arm/bifrost/mali_kbase_ioctl.h>
+#include <uapi/gpu/arm/bifrost_g7p1/mali_kbase_ioctl.h>
 #include <mmu/mali_kbase_mmu.h>
 #include <mali_kbase_caps.h>
 #include <mali_kbase_trace_gpu_mem.h>

@@ -63,7 +63,7 @@
 #ifndef _KBASE_KINSTR_JM_H_
 #define _KBASE_KINSTR_JM_H_
 
-#include <uapi/gpu/arm/bifrost/mali_kbase_kinstr_jm_reader.h>
+#include <uapi/gpu/arm/bifrost_g7p1/mali_kbase_kinstr_jm_reader.h>
 
 #ifdef __KERNEL__
 #include <linux/version.h>

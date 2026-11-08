@@ -28,7 +28,7 @@
 #if defined(CONFIG_SYNC) || defined(CONFIG_SYNC_FILE)
 #include <mali_kbase_sync.h>
 #endif
-#include <uapi/gpu/arm/bifrost/mali_kbase_ioctl.h>
+#include <uapi/gpu/arm/bifrost_g7p1/mali_kbase_ioctl.h>
 
 struct kbase_jd_debugfs_depinfo {
 	u8 id;
@@ -73,11 +73,11 @@ static void kbase_jd_debugfs_fence_info(struct kbase_jd_atom *atom,
 
 			seq_printf(sfile,
 #if (KERNEL_VERSION(4, 8, 0) > LINUX_VERSION_CODE)
-				   "Sd(%u#%u: %s) ",
+				   "Sd(%u#%llu: %s) ",
 #else
-				   "Sd(%llu#%u: %s) ",
+				   "Sd(%llu#%llu: %s) ",
 #endif
-				   fence->context, fence->seqno,
+				   fence->context, (unsigned long long)fence->seqno,
 				   dma_fence_is_signaled(fence) ? "signaled" :
 								  "active");
 		}
@@ -92,11 +92,11 @@ static void kbase_jd_debugfs_fence_info(struct kbase_jd_atom *atom,
 
 			seq_printf(sfile,
 #if (KERNEL_VERSION(4, 8, 0) > LINUX_VERSION_CODE)
-				   "Wd(%u#%u: %s) ",
+				   "Wd(%u#%llu: %s) ",
 #else
-				   "Wd(%llu#%u: %s) ",
+				   "Wd(%llu#%llu: %s) ",
 #endif
-				   fence->context, fence->seqno,
+				   fence->context, (unsigned long long)fence->seqno,
 				   dma_fence_is_signaled(fence) ? "signaled" :
 								  "active");
 		}

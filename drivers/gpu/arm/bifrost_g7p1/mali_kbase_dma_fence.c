@@ -373,7 +373,7 @@ int kbase_dma_fence_wait(struct kbase_jd_atom *katom,
 #if (KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE)
 			err = reservation_object_reserve_shared(obj);
 #else
-			err = dma_resv_reserve_shared(obj, 0);
+			err = dma_resv_reserve_shared(obj, 1);
 #endif
 			if (err) {
 				dev_err(katom->kctx->kbdev->dev,
