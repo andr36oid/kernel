@@ -131,8 +131,11 @@ static void sdcardfs_update_mnt_data(void *data, struct fs_context *fc)
 	struct sdcardfs_vfsmount_options *opts = data;
 	struct sdcardfs_context_options *fcopts = fc->fs_private;
 
-	opts->gid = fcopts->vfsopts.gid;
-	opts->mask = fcopts->vfsopts.mask;
+	/* A remount must retain fields not supplied by the caller. */
+	if (fc->purpose != FS_CONTEXT_FOR_RECONFIGURE || fcopts->gid_set)
+		opts->gid = fcopts->vfsopts.gid;
+	if (fc->purpose != FS_CONTEXT_FOR_RECONFIGURE || fcopts->mask_set)
+		opts->mask = fcopts->vfsopts.mask;
 }
 
 /*

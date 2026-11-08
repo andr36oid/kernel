@@ -82,12 +82,14 @@ static int sdcardfs_parse_param(struct fs_context *fc, struct fs_parameter *para
 		break;
 	case Opt_gid:
 		vfsopts->gid = result.uint_32;
+		fc_opts->gid_set = true;
 		break;
 	case Opt_userid:
 		opts->fs_user_id = result.uint_32;
 		break;
 	case Opt_mask:
 		vfsopts->mask = result.uint_32;
+		fc_opts->mask_set = true;
 		break;
 	case Opt_multiuser:
 		opts->multiuser = true;
