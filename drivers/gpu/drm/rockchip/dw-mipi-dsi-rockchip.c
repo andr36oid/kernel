@@ -7,6 +7,8 @@
  */
 
 #include <linux/clk.h>
+#include <linux/ctype.h>
+#include <linux/workqueue.h>
 #include <linux/gpio.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
@@ -18,6 +20,11 @@
 #include <linux/regmap.h>
 
 #include <drm/drm_dsc.h>
+#include <drm/drm_atomic.h>
+#include <drm/drm_atomic_uapi.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_modeset_lock.h>
+#include <drm/drm_probe_helper.h>
 #include <video/mipi_display.h>
 #include <uapi/linux/videodev2.h>
 #include <drm/bridge/dw_mipi_dsi.h>
@@ -308,6 +315,16 @@ struct dw_mipi_dsi_rockchip {
 
 	struct gpio_desc *te_gpio;
 	bool disable_hold_mode;
+	u32 attached_lanes;
+	/* a refresh rate tried for 5 seconds, see preview_rate_store() */
+	struct mutex preview_lock;
+	struct delayed_work preview_work;
+	struct drm_crtc *preview_crtc;
+	struct drm_property_blob *preview_blob;
+	struct drm_display_mode preview_orig;
+	unsigned long preview_next;	/* jiffies, no new preview before */
+	unsigned int preview_tries;
+	bool preview_running;
 };
 
 struct dphy_pll_parameter_map {
@@ -575,6 +592,50 @@ static void dw_mipi_dsi_phy_power_off(void *priv_data)
 
 	phy_power_off(dsi->phy);
 	dsi->phy_enabled = false;
+}
+
+static int dw_mipi_dsi_rockchip_host_attach(void *data,
+					 struct mipi_dsi_device *device)
+{
+	struct dw_mipi_dsi_rockchip *dsi = data;
+
+	dsi->attached_lanes = device->lanes;
+	dsi->format = device->format;
+	dsi->mode_flags = device->mode_flags;
+	return 0;
+}
+
+static const struct dw_mipi_dsi_host_ops dw_mipi_dsi_rockchip_host_ops = {
+	.attach = dw_mipi_dsi_rockchip_host_attach,
+};
+
+/* Uncapped lane requirement, in bits/second. Native PHY programming is unchanged. */
+static u64 dw_mipi_dsi_clock_to_lane_rate(struct dw_mipi_dsi_rockchip *dsi,
+					int clock)
+{
+	int bpp = mipi_dsi_pixel_format_to_bpp(dsi->format);
+	u32 lanes = dsi->attached_lanes;
+
+	/* The core may divide a total lane count, or pair two full hosts. */
+	if (dsi->slave && lanes <= dsi->cdata->max_data_lanes)
+		lanes *= 2;
+	if (bpp <= 0 || !lanes || clock <= 0)
+		return U64_MAX;
+	return DIV_ROUND_UP_ULL((u64)clock * 1000 * bpp * 10, lanes * 9);
+}
+
+static enum drm_mode_status
+dw_mipi_dsi_rockchip_mode_valid(void *data, const struct drm_display_mode *mode)
+{
+	struct dw_mipi_dsi_rockchip *dsi = data;
+
+	if (of_property_read_bool(dsi->dev->of_node, "rockchip,lane-rate") ||
+	    (mode->type & DRM_MODE_TYPE_PREFERRED))
+		return MODE_OK;
+	if (dw_mipi_dsi_clock_to_lane_rate(dsi, mode->clock) >
+	    dsi->cdata->max_bit_rate_per_lane)
+		return MODE_CLOCK_HIGH;
+	return MODE_OK;
 }
 
 static unsigned int dw_mipi_dsi_calculate_lane_mpbs(struct dw_mipi_dsi_rockchip *dsi,
@@ -1024,6 +1085,289 @@ static int dw_mipi_dsi_get_dsc_info_from_sink(struct dw_mipi_dsi_rockchip *dsi,
 	return 0;
 }
 
+/*
+ * Refresh rate preview: root writes a rate in Hz (up to three decimals) to
+ * preview_rate on this device, and the panel's own mode at that rate is shown
+ * for 5 seconds. Then the mode from before comes back, whatever userspace does
+ * meanwhile; the timer is here, not in userspace. Writing 0 brings it back at
+ * once. A new preview can start 2 seconds after the last one ended.
+ *
+ * The rate is set with a commit of our own that changes only the CRTC's mode,
+ * planes and everything else stay. The Rockchip HWC sends MODE_ID only when it
+ * changes the display config or switches the screen on or off, never with a
+ * frame, so it doesn't undo the preview. If it does set a mode meanwhile, its
+ * mode stays: that one is from the mode list, and the preview is over anyway.
+ */
+#define DSI_PREVIEW_MS			5000
+#define DSI_PREVIEW_COOLDOWN_MS		2000
+#define DSI_PREVIEW_RETRY_MS		1000
+#define DSI_PREVIEW_TRIES		5
+#define DSI_PREVIEW_MIN_MHZ		30000
+#define DSI_PREVIEW_MAX_MHZ		300000
+
+/* "77.5" -> 77500, in milli-Hz; 0 when it doesn't parse */
+static unsigned int dw_mipi_dsi_parse_mhz(const char *s)
+{
+	unsigned int hz = 0, frac = 0;
+	int digits = -1;
+
+	if (!isdigit(*s))
+		return 0;
+	for (; *s; s++) {
+		if (*s == '.' && digits < 0) {
+			digits = 0;
+			continue;
+		}
+		if (!isdigit(*s))
+			return 0;
+		if (digits < 0) {
+			hz = hz * 10 + (*s - '0');
+			if (hz > DSI_PREVIEW_MAX_MHZ / 1000)
+				return 0;
+		} else {
+			if (digits == 3)
+				return 0;
+			frac = frac * 10 + (*s - '0');
+			digits++;
+		}
+	}
+	for (; digits >= 0 && digits < 3; digits++)
+		frac *= 10;
+
+	return hz * 1000 + frac;
+}
+
+/* the panel's own mode; with all modeset locks held */
+static struct drm_display_mode *dw_mipi_dsi_native_mode(struct dw_mipi_dsi_rockchip *dsi)
+{
+	struct drm_display_mode *m;
+
+	list_for_each_entry(m, &dsi->sub_dev.connector->modes, head)
+		if (m->type & DRM_MODE_TYPE_PREFERRED)
+			return m;
+
+	return NULL;
+}
+
+/* set a mode on the CRTC and keep everything else; with all modeset locks held */
+static int dw_mipi_dsi_commit_mode(struct dw_mipi_dsi_rockchip *dsi,
+				   struct drm_crtc *crtc,
+				   const struct drm_display_mode *mode)
+{
+	struct drm_device *drm = dsi->sub_dev.connector->dev;
+	struct drm_atomic_state *state;
+	struct drm_crtc_state *crtc_state;
+	int ret;
+
+	state = drm_atomic_state_alloc(drm);
+	if (!state)
+		return -ENOMEM;
+	state->acquire_ctx = drm->mode_config.acquire_ctx;
+
+	crtc_state = drm_atomic_get_crtc_state(state, crtc);
+	if (IS_ERR(crtc_state)) {
+		ret = PTR_ERR(crtc_state);
+		goto out;
+	}
+	ret = drm_atomic_set_mode_for_crtc(crtc_state, mode);
+	if (ret)
+		goto out;
+	ret = drm_atomic_add_affected_connectors(state, crtc);
+	if (ret)
+		goto out;
+	ret = drm_atomic_add_affected_planes(state, crtc);
+	if (ret)
+		goto out;
+
+	ret = drm_atomic_commit(state);
+out:
+	drm_atomic_state_put(state);
+	return ret;
+}
+
+static unsigned int dw_mipi_dsi_mode_mhz(const struct drm_display_mode *m)
+{
+	if (!m->htotal || !m->vtotal)
+		return 0;
+
+	return DIV_ROUND_CLOSEST_ULL((u64)m->clock * 1000000,
+				     m->htotal * m->vtotal);
+}
+
+static void dw_mipi_dsi_preview_end(struct dw_mipi_dsi_rockchip *dsi)
+{
+	drm_property_blob_put(dsi->preview_blob);
+	dsi->preview_blob = NULL;
+	dsi->preview_crtc = NULL;
+	dsi->preview_running = false;
+	dsi->preview_next = jiffies + msecs_to_jiffies(DSI_PREVIEW_COOLDOWN_MS);
+}
+
+static void dw_mipi_dsi_preview_restore(struct work_struct *work)
+{
+	struct dw_mipi_dsi_rockchip *dsi = container_of(to_delayed_work(work),
+					       struct dw_mipi_dsi_rockchip, preview_work);
+	struct drm_device *drm = dsi->sub_dev.connector->dev;
+	struct drm_display_mode *native;
+	struct drm_crtc *crtc;
+	unsigned int mhz;
+	int ret;
+
+	mutex_lock(&dsi->preview_lock);
+	if (!dsi->preview_running)
+		goto unlock;
+
+	drm_modeset_lock_all(drm);
+	crtc = dsi->preview_crtc;
+	if (crtc->state->mode_blob != dsi->preview_blob) {
+		/* screen off, or the HWC set a mode from its list meanwhile */
+		pr_info("dw-mipi-dsi: preview over, the mode was changed meanwhile, nothing to restore\n");
+		goto done;
+	}
+
+	mhz = dw_mipi_dsi_mode_mhz(&dsi->preview_orig);
+	ret = dw_mipi_dsi_commit_mode(dsi, crtc, &dsi->preview_orig);
+	if (ret) {
+		pr_err("dw-mipi-dsi: preview restore to %u.%03u Hz failed (%d), trying the panel's own mode\n",
+		       mhz / 1000, mhz % 1000, ret);
+		native = dw_mipi_dsi_native_mode(dsi);
+		ret = native ? dw_mipi_dsi_commit_mode(dsi, crtc, native) : -ENOENT;
+		if (!ret)
+			mhz = dw_mipi_dsi_mode_mhz(native);
+	}
+	if (ret) {
+		if (++dsi->preview_tries < DSI_PREVIEW_TRIES) {
+			pr_err("dw-mipi-dsi: preview restore failed (%d), again in 1 s\n",
+			       ret);
+			drm_modeset_unlock_all(drm);
+			schedule_delayed_work(&dsi->preview_work,
+					msecs_to_jiffies(DSI_PREVIEW_RETRY_MS));
+			goto unlock;
+		}
+		pr_err("dw-mipi-dsi: preview restore failed (%d), giving up\n",
+		       ret);
+		goto done;
+	}
+	pr_info("dw-mipi-dsi: preview over, back to %u.%03u Hz\n",
+		mhz / 1000, mhz % 1000);
+done:
+	dw_mipi_dsi_preview_end(dsi);
+	drm_modeset_unlock_all(drm);
+unlock:
+	mutex_unlock(&dsi->preview_lock);
+}
+
+static int dw_mipi_dsi_preview_start(struct dw_mipi_dsi_rockchip *dsi,
+				     unsigned int rate_mhz)
+{
+	struct drm_device *drm = dsi->sub_dev.connector->dev;
+	struct drm_connector_state *conn_state;
+	struct drm_property_blob *orig_blob;
+	struct drm_display_mode *native;
+	struct drm_display_mode mode = {};
+	struct drm_crtc *crtc;
+	unsigned int orig_mhz;
+	int ret;
+
+	mutex_lock(&dsi->preview_lock);
+	if (dsi->preview_running || time_before(jiffies, dsi->preview_next)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	drm_modeset_lock_all(drm);
+	conn_state = dsi->sub_dev.connector->state;
+	crtc = conn_state ? conn_state->crtc : NULL;
+	if (!crtc || !crtc->state->active || !crtc->state->mode_blob) {
+		ret = -ENODEV;
+		goto unlock_all;
+	}
+	native = dw_mipi_dsi_native_mode(dsi);
+	if (!native || !native->htotal || !native->vtotal) {
+		ret = -ENODEV;
+		goto unlock_all;
+	}
+
+	/* as panel-simple builds its extra rates: the clock scaled, porches kept */
+	drm_mode_copy(&mode, native);
+	mode.type = DRM_MODE_TYPE_DRIVER;
+	mode.clock = DIV_ROUND_CLOSEST_ULL((u64)native->htotal * native->vtotal *
+					   rate_mhz, 1000000);
+	if (dw_mipi_dsi_rockchip_mode_valid(dsi, &mode) != MODE_OK) {
+		pr_info("dw-mipi-dsi: preview of %u.%03u Hz refused, the DSI lanes can't carry %d kHz\n",
+			rate_mhz / 1000, rate_mhz % 1000, mode.clock);
+		ret = -ERANGE;
+		goto unlock_all;
+	}
+
+	drm_mode_copy(&dsi->preview_orig, &crtc->state->mode);
+	orig_mhz = dw_mipi_dsi_mode_mhz(&dsi->preview_orig);
+	orig_blob = crtc->state->mode_blob;
+
+	ret = dw_mipi_dsi_commit_mode(dsi, crtc, &mode);
+	if (ret) {
+		pr_info("dw-mipi-dsi: preview of %u.%03u Hz failed (%d)\n",
+			rate_mhz / 1000, rate_mhz % 1000, ret);
+		/* a failed commit changes nothing, but make sure */
+		if (crtc->state->mode_blob != orig_blob)
+			dw_mipi_dsi_commit_mode(dsi, crtc, &dsi->preview_orig);
+		goto unlock_all;
+	}
+
+	dsi->preview_crtc = crtc;
+	dsi->preview_blob = drm_property_blob_get(crtc->state->mode_blob);
+	dsi->preview_tries = 0;
+	dsi->preview_running = true;
+	schedule_delayed_work(&dsi->preview_work,
+			      msecs_to_jiffies(DSI_PREVIEW_MS));
+	pr_info("dw-mipi-dsi: previewing %u.%03u Hz (%d kHz) for 5 s, then back to %u.%03u Hz\n",
+		rate_mhz / 1000, rate_mhz % 1000, mode.clock,
+		orig_mhz / 1000, orig_mhz % 1000);
+
+unlock_all:
+	drm_modeset_unlock_all(drm);
+unlock:
+	mutex_unlock(&dsi->preview_lock);
+	return ret;
+}
+
+/* write-only, root only: a rate in Hz like 77.5 to preview, 0 to end it now */
+static ssize_t preview_rate_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct dw_mipi_dsi_rockchip *dsi = dev_get_drvdata(dev);
+	unsigned int mhz;
+	bool running;
+	char tmp[16];
+	int ret;
+
+	if (sysfs_streq(buf, "0")) {
+		mutex_lock(&dsi->preview_lock);
+		running = dsi->preview_running;
+		if (running)
+			mod_delayed_work(system_wq, &dsi->preview_work, 0);
+		mutex_unlock(&dsi->preview_lock);
+		if (running)
+			flush_delayed_work(&dsi->preview_work);
+		return count;
+	}
+
+	if (count >= sizeof(tmp))
+		return -EINVAL;
+	memcpy(tmp, buf, count);
+	tmp[count] = '\0';
+	mhz = dw_mipi_dsi_parse_mhz(strim(tmp));
+	if (mhz < DSI_PREVIEW_MIN_MHZ || mhz > DSI_PREVIEW_MAX_MHZ)
+		return -EINVAL;
+
+	ret = dw_mipi_dsi_preview_start(dsi, mhz);
+
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(preview_rate);
+
+
 static int dw_mipi_dsi_rockchip_bind(struct device *dev,
 				     struct device *master,
 				     void *data)
@@ -1083,10 +1427,19 @@ static int dw_mipi_dsi_rockchip_bind(struct device *dev,
 		dw_mipi_dsi_get_dsc_info_from_sink(dsi, dsi->panel, NULL);
 
 	dsi->sub_dev.connector = dw_mipi_dsi_get_connector(dsi->dmd);
+	if (IS_ERR(dsi->sub_dev.connector)) {
+		ret = PTR_ERR(dsi->sub_dev.connector);
+		dsi->sub_dev.connector = NULL;
+		dw_mipi_dsi_unbind(dsi->dmd);
+		clk_disable_unprepare(dsi->pllref_clk);
+		return ret;
+	}
 	if (dsi->sub_dev.connector) {
 		dsi->sub_dev.of_node = dev->of_node;
 		dsi->sub_dev.loader_protect = dw_mipi_dsi_rockchip_encoder_loader_protect;
 		rockchip_drm_register_sub_dev(&dsi->sub_dev);
+		if (device_create_file(dev, &dev_attr_preview_rate))
+			DRM_DEV_ERROR(dev, "Failed to add preview_rate\n");
 	}
 
 	return 0;
@@ -1101,10 +1454,18 @@ static void dw_mipi_dsi_rockchip_unbind(struct device *dev,
 	if (dsi->is_slave)
 		return;
 
+	device_remove_file(dev, &dev_attr_preview_rate);
+	cancel_delayed_work_sync(&dsi->preview_work);
+	mutex_lock(&dsi->preview_lock);
+	if (dsi->preview_running)
+		dw_mipi_dsi_preview_end(dsi);
+	mutex_unlock(&dsi->preview_lock);
+
 	if (dsi->sub_dev.connector)
 		rockchip_drm_unregister_sub_dev(&dsi->sub_dev);
 
 	dw_mipi_dsi_unbind(dsi->dmd);
+	dsi->sub_dev.connector = NULL;
 
 	clk_disable_unprepare(dsi->pllref_clk);
 }
@@ -1267,9 +1628,13 @@ static int dw_mipi_dsi_rockchip_probe(struct platform_device *pdev)
 	}
 
 	dsi->dev = dev;
+	mutex_init(&dsi->preview_lock);
+	INIT_DELAYED_WORK(&dsi->preview_work, dw_mipi_dsi_preview_restore);
 	dsi->pdata.base = dsi->base;
 	dsi->pdata.max_data_lanes = dsi->cdata->max_data_lanes;
 	dsi->pdata.phy_ops = &dw_mipi_dsi_rockchip_phy_ops;
+	dsi->pdata.host_ops = &dw_mipi_dsi_rockchip_host_ops;
+	dsi->pdata.mode_valid = dw_mipi_dsi_rockchip_mode_valid;
 	dsi->pdata.priv_data = dsi;
 
 	if (dsi->cdata->soc_type == RK3568 || dsi->cdata->soc_type == RK3562)
@@ -1334,7 +1699,35 @@ static __maybe_unused int dw_mipi_dsi_runtime_resume(struct device *dev)
 	return 0;
 }
 
+/*
+ * A refresh rate preview still running when the console goes to sleep is
+ * ended now, before any device sleeps: its restore is a modeset, and run
+ * later it would hit the VOP and DSI with their power domain off.
+ */
+static int __maybe_unused dw_mipi_dsi_prepare(struct device *dev)
+{
+	struct dw_mipi_dsi_rockchip *dsi = dev_get_drvdata(dev);
+	bool running;
+
+	if (!dsi)
+		return 0;
+	mutex_lock(&dsi->preview_lock);
+	running = dsi->preview_running;
+	if (running)
+		mod_delayed_work(system_wq, &dsi->preview_work, 0);
+	mutex_unlock(&dsi->preview_lock);
+	if (running)
+		flush_delayed_work(&dsi->preview_work);
+	mutex_lock(&dsi->preview_lock);
+	running = dsi->preview_running;
+	mutex_unlock(&dsi->preview_lock);
+	return running ? -EBUSY : 0;
+}
+
 static const struct dev_pm_ops dw_mipi_dsi_rockchip_pm_ops = {
+#ifdef CONFIG_PM_SLEEP
+	.prepare = dw_mipi_dsi_prepare,
+#endif
 	SET_RUNTIME_PM_OPS(dw_mipi_dsi_runtime_suspend,
 			   dw_mipi_dsi_runtime_resume, NULL)
 };
