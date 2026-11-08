@@ -142,6 +142,7 @@ struct panel_simple {
 	struct mipi_dsi_device *dsi;
 	bool prepared;
 	bool enabled;
+	bool loader_protected;
 	bool power_invert;
 	bool no_hpd;
 
@@ -462,6 +463,10 @@ int panel_simple_loader_protect(struct drm_panel *panel)
 	struct panel_simple *p = to_panel_simple(panel);
 	int err;
 
+	/* Do not acquire a second supply reference for an existing state. */
+	if (p->prepared)
+		return 0;
+
 	err = panel_simple_regulator_enable(p);
 	if (err < 0) {
 		dev_err(panel->dev, "failed to enable supply: %d\n", err);
@@ -470,10 +475,37 @@ int panel_simple_loader_protect(struct drm_panel *panel)
 
 	p->prepared = true;
 	p->enabled = true;
+	p->loader_protected = true;
+	dev_dbg(panel->dev, "loader acquired prepared=1 enabled=1\n");
 
 	return 0;
 }
 EXPORT_SYMBOL(panel_simple_loader_protect);
+
+int panel_simple_loader_unprotect(struct drm_panel *panel)
+{
+	struct panel_simple *p = to_panel_simple(panel);
+	int err;
+
+	if (!p->loader_protected)
+		return 0;
+
+	/* A rejected logo is not a prepared kernel panel. Balance only the
+	 * supply reference acquired above; the next prepare performs reset/init.
+	 */
+	err = panel_simple_regulator_disable(p);
+	if (err) {
+		dev_err(panel->dev, "loader release failed: %d\n", err);
+		return err;
+	}
+	p->prepared = false;
+	p->enabled = false;
+	p->loader_protected = false;
+	dev_dbg(panel->dev, "loader released prepared=0 enabled=0\n");
+
+	return 0;
+}
+EXPORT_SYMBOL(panel_simple_loader_unprotect);
 
 static int panel_simple_disable(struct drm_panel *panel)
 {
@@ -518,6 +550,7 @@ static int panel_simple_unprepare(struct drm_panel *panel)
 		panel_simple_msleep(p->desc->delay.unprepare);
 
 	p->prepared = false;
+	p->loader_protected = false;
 
 	return 0;
 }
@@ -554,6 +587,8 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	int err;
 	int hpd_asserted;
 
+	dev_dbg(panel->dev, "prepare prepared=%u enabled=%u loader=%u\n",
+		 p->prepared, p->enabled, p->loader_protected);
 	if (p->prepared)
 		return 0;
 
@@ -594,11 +629,13 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	}
 
 	gpiod_direction_output(p->reset_gpio, 1);
+	dev_dbg(panel->dev, "reset asserted\n");
 
 	if (p->desc->delay.reset)
 		panel_simple_msleep(p->desc->delay.reset);
 
 	gpiod_direction_output(p->reset_gpio, 0);
+	dev_dbg(panel->dev, "reset released\n");
 
 	if (p->desc->delay.init)
 		panel_simple_msleep(p->desc->delay.init);
@@ -619,6 +656,7 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	}
 
 	p->prepared = true;
+	dev_dbg(panel->dev, "prepare complete\n");
 
 	return 0;
 }
@@ -634,6 +672,7 @@ static int panel_simple_enable(struct drm_panel *panel)
 		panel_simple_msleep(p->desc->delay.enable);
 
 	p->enabled = true;
+	dev_dbg(panel->dev, "enable complete\n");
 
 	return 0;
 }

@@ -879,13 +879,21 @@ static int dw_mipi_dsi_rockchip_encoder_loader_protect(struct drm_encoder *encod
 					      bool on)
 {
 	struct dw_mipi_dsi_rockchip *dsi = to_dsi(encoder);
+	int ret = 0;
 
-	if (dsi->panel)
-		panel_simple_loader_protect(dsi->panel);
+	dev_dbg(dsi->dev, "loader protect on=%u\n", on);
+	if (dsi->panel) {
+		if (on)
+			ret = panel_simple_loader_protect(dsi->panel);
+		else
+			ret = panel_simple_loader_unprotect(dsi->panel);
+		if (ret && on)
+			return ret;
+	}
 
 	dw_mipi_dsi_rockchip_loader_protect(dsi, on);
 
-	return 0;
+	return ret;
 }
 
 static const struct drm_encoder_helper_funcs

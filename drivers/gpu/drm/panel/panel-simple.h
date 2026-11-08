@@ -10,8 +10,13 @@
 
 #if IS_REACHABLE(CONFIG_DRM_PANEL_SIMPLE)
 int panel_simple_loader_protect(struct drm_panel *panel);
+int panel_simple_loader_unprotect(struct drm_panel *panel);
 #else
 static inline int panel_simple_loader_protect(struct drm_panel *panel)
+{
+	return 0;
+}
+static inline int panel_simple_loader_unprotect(struct drm_panel *panel)
 {
 	return 0;
 }
