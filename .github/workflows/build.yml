@@ -60,9 +60,15 @@ jobs:
             git init -q $EXT/$name
             git -C $EXT/$name fetch -q --depth 1 https://github.com/$repo.git $sha
             git -C $EXT/$name checkout -q FETCH_HEAD
-            if [ "$name" = 8723bu ]; then
-              sed -i 's/^EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE/#&/' $EXT/$name/Makefile
-            fi
+            case $name in
+              8723bu)
+                sed -i 's/^EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE/#&/' $EXT/$name/Makefile
+                sed -i '/^#if 0$/{N;/building for Android/s/^#if 0/#if 1/}' $EXT/$name/os_dep/usb_intf.c
+                ;;
+              8192eu)
+                sed -i '/^MODULE_LICENSE("GPL");$/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' $EXT/$name/os_dep/linux/os_intfs.c
+                ;;
+            esac
             make -C $EXT/$name CC="$KCC" KSRC=$OUT KVER=$KREL $extra -j$(nproc) modules
           done <<'LIST'
           8812au   morrownr/8812au-20210820           4722250273e4316daf9d8688e9916ea94c36a5ff
