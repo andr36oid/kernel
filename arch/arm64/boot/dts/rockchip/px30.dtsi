@@ -1073,6 +1073,8 @@
 		clocks = <&cru PCLK_WDT_NS>;
 		interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
 		status = "disabled";
+		resets = <&cru SRST_WDT_NS_P>;
+		reset-names = "reset";
 	};
 
 	pwm0: pwm@ff200000 {

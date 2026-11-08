@@ -40,3 +40,5 @@ obj-$(CONFIG_RK_MEMBLOCK_PROCFS) += rk_memblock_procfs.o
 obj-$(CONFIG_ROCKCHIP_MINIDUMP)	+= minidump/
 
 obj-$(CONFIG_ANDR36OID_STATUS_LED) += andr36oid_status_led.o
+
+obj-$(CONFIG_ANDR36OID_SLEEP_WDT) += andr36oid_sleep_wdt.o

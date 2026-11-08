@@ -23,6 +23,15 @@
 #include <linux/nmi.h>
 #include <linux/sched/wake_q.h>
 #include <linux/slab.h>
+#include <linux/sched/clock.h>
+
+#ifdef CONFIG_ANDR36OID_SLEEP_WDT
+void andr36oid_stuck_dump(void);
+#else
+static inline void andr36oid_stuck_dump(void) { }
+#endif
+#define MULTI_STOP_STUCK_NS (10ULL * NSEC_PER_SEC)
+static atomic_t multi_stop_stuck_reported;
 
 /* the actual stopper, one per every possible cpu, enabled on online cpus */
 struct cpu_stopper {
@@ -183,6 +192,8 @@ static int multi_cpu_stop(void *data)
 	const struct cpumask *cpumask;
 	unsigned long flags;
 	bool is_active;
+	u64 since = local_clock();
+	unsigned int spins = 0;
 
 	/*
 	 * When called from stop_machine_from_inactive_cpu(), irq might
@@ -218,6 +229,15 @@ static int multi_cpu_stop(void *data)
 				break;
 			}
 			ack_state(msdata);
+			since = local_clock();
+		} else if (!(++spins & 0x3ff) &&
+			   local_clock() - since > MULTI_STOP_STUCK_NS &&
+			   !atomic_xchg(&multi_stop_stuck_reported, 1)) {
+			pr_emerg("stop_machine: CPU%d waited 10 s in state %d, %d of %u cores not acked, cpu_online %*pbl\n",
+				 cpu, curstate, atomic_read(&msdata->thread_ack),
+				 msdata->num_threads, cpumask_pr_args(cpu_online_mask));
+			andr36oid_stuck_dump();
+			panic("stop_machine hung");
 		} else if (curstate > MULTI_STOP_PREPARE) {
 			/*
 			 * At this stage all other CPUs we depend on must spin
