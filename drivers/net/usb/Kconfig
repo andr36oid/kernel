@@ -111,6 +111,16 @@ config USB_RTL8152
 	  To compile this driver as a module, choose M here: the
 	  module will be called r8152.
 
+config USB_RTL8152_REALTEK
+	bool "Use Realtek's vendor r8152 driver"
+	depends on USB_RTL8152
+	help
+	  Build Realtek's own r8152 driver (v2.21.4) from
+	  drivers/net/usb/r8152-realtek instead of the in-tree one. It
+	  also supports RTL8153C/RTL8153D, the RTL8156/RTL8156B 2.5 Gbps
+	  and the RTL8157 5 Gbps chips. Only one of the two drivers is
+	  built, so the USB IDs are never claimed twice.
+
 config USB_LAN78XX
 	tristate "Microchip LAN78XX Based USB Ethernet Adapters"
 	select MII
@@ -211,6 +221,17 @@ config USB_NET_AX88179_178A
 
 	  This driver creates an interface named "ethX", where X depends on
 	  what other networking devices you have in use.
+
+config USB_NET_AX88179_178A_ASIX
+	bool "Use ASIX's vendor ax_usb_nic driver"
+	depends on USB_NET_AX88179_178A
+	help
+	  Build ASIX's own ax_usb_nic driver (v3.5.0) from
+	  drivers/net/usb/ax_usb_nic instead of the in-tree ax88179_178a.
+	  Besides AX88179 and AX88178A it supports the AX88179A and AX88772D
+	  (USB 3.0/2.0 Gigabit and Fast Ethernet) and the AX88279 2.5 Gbps
+	  chips. Only one of the two drivers is built. Its interfaces are
+	  named "ethX" as well.
 
 config USB_NET_CDCETHER
 	tristate "CDC Ethernet support (smart devices such as cable modems)"
@@ -620,6 +641,20 @@ config USB_NET_CH9200
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ch9200.
+
+config USB_NET_CH397
+	tristate "WCH CH397/CH396/CH339/CH336 USB ethernet (vendor driver)"
+	depends on USB_USBNET
+	select MII
+	select CRC32
+	help
+	  WCH's own driver (github.com/WCHSoftGroup/ch397_linux, V1.5) for
+	  the CH397 family of USB 2.0 Fast Ethernet chips when they run in
+	  their vendor mode. In CDC-ECM mode these chips are handled by
+	  cdc_ether, which is registered first and keeps them.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ch397.
 
 config USB_NET_AQC111
 	tristate "Aquantia AQtion USB to 5/2.5GbE Controllers support"

@@ -53,6 +53,37 @@ static bool is_uac3_config(struct usb_interface_descriptor *desc)
 	return desc->bInterfaceProtocol == UAC_VERSION_3;
 }
 
+#if IS_ENABLED(CONFIG_USB_IPHETH)
+/*
+ * iPhones and iPads only expose their tethering interface (the one ipheth
+ * binds to) in a later configuration. On desktops usbmuxd switches to it;
+ * Android has no usbmuxd, so pick that configuration here.
+ */
+static bool has_apple_ethernet(struct usb_device *udev,
+			       struct usb_host_config *c)
+{
+	int i, j;
+
+	if (le16_to_cpu(udev->descriptor.idVendor) != 0x05ac)
+		return false;
+
+	for (i = 0; i < c->desc.bNumInterfaces; i++) {
+		struct usb_interface_cache *ic = c->intf_cache[i];
+
+		for (j = 0; ic && j < ic->num_altsetting; j++) {
+			struct usb_interface_descriptor *d =
+				&ic->altsetting[j].desc;
+
+			if (d->bInterfaceClass == USB_CLASS_VENDOR_SPEC &&
+			    d->bInterfaceSubClass == 253 &&
+			    d->bInterfaceProtocol == 1)
+				return true;
+		}
+	}
+	return false;
+}
+#endif
+
 int usb_choose_configuration(struct usb_device *udev)
 {
 	int i;
@@ -117,6 +148,13 @@ int usb_choose_configuration(struct usb_device *udev)
 			insufficient_power++;
 			continue;
 		}
+
+#if IS_ENABLED(CONFIG_USB_IPHETH)
+		if (has_apple_ethernet(udev, c)) {
+			best = c;
+			break;
+		}
+#endif
 
 		/*
 		 * Select first configuration as default for audio so that

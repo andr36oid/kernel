@@ -7,12 +7,20 @@ obj-$(CONFIG_USB_CATC)		+= catc.o
 obj-$(CONFIG_USB_KAWETH)	+= kaweth.o
 obj-$(CONFIG_USB_PEGASUS)	+= pegasus.o
 obj-$(CONFIG_USB_RTL8150)	+= rtl8150.o
+ifeq ($(CONFIG_USB_RTL8152_REALTEK),y)
+obj-$(CONFIG_USB_RTL8152) += r8152-realtek/
+else
 obj-$(CONFIG_USB_RTL8152)	+= r8152.o
+endif
 obj-$(CONFIG_USB_HSO)		+= hso.o
 obj-$(CONFIG_USB_LAN78XX)	+= lan78xx.o
 obj-$(CONFIG_USB_NET_AX8817X)	+= asix.o
 asix-y := asix_devices.o asix_common.o ax88172a.o
+ifeq ($(CONFIG_USB_NET_AX88179_178A_ASIX),y)
+obj-$(CONFIG_USB_NET_AX88179_178A) += ax_usb_nic/
+else
 obj-$(CONFIG_USB_NET_AX88179_178A)      += ax88179_178a.o
+endif
 obj-$(CONFIG_USB_NET_CDCETHER)	+= cdc_ether.o
 obj-$(CONFIG_USB_NET_CDC_EEM)	+= cdc_eem.o
 obj-$(CONFIG_USB_NET_DM9601)	+= dm9601.o
@@ -41,3 +49,5 @@ obj-$(CONFIG_USB_NET_QMI_WWAN)	+= qmi_wwan.o
 obj-$(CONFIG_USB_NET_CDC_MBIM)	+= cdc_mbim.o
 obj-$(CONFIG_USB_NET_CH9200)	+= ch9200.o
 obj-$(CONFIG_USB_NET_AQC111)	+= aqc111.o
+
+obj-$(CONFIG_USB_NET_CH397) += ch397.o
