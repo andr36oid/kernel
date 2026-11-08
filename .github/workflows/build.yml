@@ -56,16 +56,21 @@ jobs:
         run: |
           set -e
           mkdir -p $EXT
-          while read -r name repo sha; do
+          while read -r name repo sha extra; do
             git init -q $EXT/$name
             git -C $EXT/$name fetch -q --depth 1 https://github.com/$repo.git $sha
             git -C $EXT/$name checkout -q FETCH_HEAD
-            make -C $EXT/$name CC="$KCC" KSRC=$OUT KVER=$KREL -j$(nproc) modules
+            if [ "$name" = 8723bu ]; then
+              sed -i 's/^EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE/#&/' $EXT/$name/Makefile
+            fi
+            make -C $EXT/$name CC="$KCC" KSRC=$OUT KVER=$KREL $extra -j$(nproc) modules
           done <<'LIST'
-          8812au   morrownr/8812au-20210820   4722250273e4316daf9d8688e9916ea94c36a5ff
-          8821cu   morrownr/8821cu-20210916   bda65aac150d2cde0df9603206eec23a6f3b77c4
-          88x2bu   morrownr/88x2bu-20210702   d31ffa827bb95b8a436c2a469b5163b634ac4333
-          8188fu   kelebek333/rtl8188fu       799fa0beacadce84bef6514d5948b454a8037c96
+          8812au   morrownr/8812au-20210820           4722250273e4316daf9d8688e9916ea94c36a5ff
+          8821cu   morrownr/8821cu-20210916           bda65aac150d2cde0df9603206eec23a6f3b77c4
+          88x2bu   morrownr/88x2bu-20210702           d31ffa827bb95b8a436c2a469b5163b634ac4333
+          8188fu   kelebek333/rtl8188fu               799fa0beacadce84bef6514d5948b454a8037c96
+          8723bu   lwfinger/rtl8723bu                 af3a408d6399655b0db23c2c8720436ca725ca47
+          8192eu   Mange/rtl8192eu-linux-driver       c629cc972a0d878c930d19c4a9309c27c1e61f92   CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM_AARCH64=y CROSS_COMPILE=aarch64-linux-gnu-
           LIST
 
       - name: Install modules
