@@ -50,6 +50,12 @@
  * 0xff: -95dB
  */
 #define OUT_VOLUME	(0x03)
+#define MASTER_VOLUME_MAX 0xff
+#define CLASSD_MIXCTL 0xb0
+
+static bool force_spk_hp;
+module_param(force_spk_hp, bool, 0644);
+MODULE_PARM_DESC(force_spk_hp, "Drive speaker and headphones on every active playback path");
 
 /*
  * DADC L/R volume setting
@@ -82,6 +88,9 @@ struct rk817_codec_priv {
 	unsigned int spk_volume;
 	unsigned int hp_volume;
 	unsigned int capture_volume;
+	bool hw_master_mode;
+	int master_volume;
+	struct mutex volume_lock;
 
 	bool mic_in_differential;
 	bool pdmdata_out_enable;
@@ -609,10 +618,11 @@ static int rk817_codec_power_down(struct snd_soc_component *component, int type)
 
 /* For tiny alsa playback/capture/voice call path */
 static const char * const rk817_playback_path_mode[] = {
-	"OFF", "SPK", "HP", "SPK_HP"};
+	"OFF", "RCV", "SPK", "HP", "HP_NO_MIC", "BT", "SPK_HP",
+	"RING_SPK", "RING_HP", "RING_HP_NO_MIC", "RING_SPK_HP"};
 
 static const char * const rk817_capture_path_mode[] = {
-	"MIC OFF", "Main Mic"};
+	"MIC OFF", "Main Mic", "Hands Free Mic", "BT Sco Mic"};
 
 static const char * const rk817_binary_mode[] = {"OFF", "ON"};
 
@@ -625,11 +635,132 @@ static SOC_ENUM_SINGLE_DECL(rk817_capture_path_type,
 static SOC_ENUM_SINGLE_DECL(rk817_resume_path_type,
 	0, 0, rk817_binary_mode);
 
+/* The hardware step is 37.5 cB; TLV scale steps are integral cB. */
+static const DECLARE_TLV_DB_SCALE(rk817_master_tlv, -9690, 38, 0);
+
+/* volume_lock serializes control writes with path changes and resume. */
+static int rk817_write_volume(struct snd_soc_component *component,
+			      unsigned int volume)
+{
+	int ret;
+
+	ret = snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL, volume);
+	if (ret < 0)
+		return ret;
+	return snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR, volume);
+}
+
+static int rk817_active_path_volume(struct rk817_codec_priv *rk817)
+{
+	switch (rk817->playback_path) {
+	case RCV:
+	case SPK_PATH:
+	case RING_SPK:
+		return rk817->spk_volume;
+	case HP_PATH:
+	case HP_NO_MIC:
+	case RING_HP:
+	case RING_HP_NO_MIC:
+	case SPK_HP:
+	case RING_SPK_HP:
+		return rk817->hp_volume;
+	default:
+		return -1;
+	}
+}
+
+static int rk817_master_get(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+
+	mutex_lock(&rk817->volume_lock);
+	ucontrol->value.integer.value[0] = rk817->master_volume;
+	ucontrol->value.integer.value[1] = rk817->master_volume;
+	mutex_unlock(&rk817->volume_lock);
+	return 0;
+}
+
+static int rk817_master_put(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	long left = ucontrol->value.integer.value[0];
+	long right = ucontrol->value.integer.value[1];
+	int value, ret = 0;
+
+	if (left < 0 || left > MASTER_VOLUME_MAX ||
+	    right < 0 || right > MASTER_VOLUME_MAX)
+		return -EINVAL;
+	mutex_lock(&rk817->volume_lock);
+	/* One shared master: accept either channel being changed by itself. */
+	value = left == rk817->master_volume ? right : left;
+	if (value != rk817->master_volume) {
+		if (rk817->hw_master_mode && rk817_active_path_volume(rk817) >= 0) {
+			ret = rk817_write_volume(component, MASTER_VOLUME_MAX - value);
+			if (ret < 0)
+				goto out;
+		}
+		rk817->master_volume = value;
+		ret = 1;
+	}
+out:
+	mutex_unlock(&rk817->volume_lock);
+	return ret;
+}
+
+static int rk817_master_switch_get(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+
+	mutex_lock(&rk817->volume_lock);
+	ucontrol->value.integer.value[0] = rk817->hw_master_mode;
+	mutex_unlock(&rk817->volume_lock);
+	return 0;
+}
+
+static int rk817_master_switch_put(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	long value = ucontrol->value.integer.value[0];
+	int volume, ret = 0;
+
+	if (value != 0 && value != 1)
+		return -EINVAL;
+	mutex_lock(&rk817->volume_lock);
+	if (rk817->hw_master_mode != value) {
+		volume = rk817_active_path_volume(rk817);
+		if (volume >= 0) {
+			if (value)
+				volume = MASTER_VOLUME_MAX - rk817->master_volume;
+			ret = rk817_write_volume(component, volume);
+			if (ret < 0)
+				goto out;
+		}
+		rk817->hw_master_mode = value;
+		ret = 1;
+	}
+out:
+	mutex_unlock(&rk817->volume_lock);
+	return ret;
+}
+
 static int rk817_playback_path_config(struct snd_soc_component *component,
 				      long pre_path, long target_path)
 {
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	int volume;
 
+	if (target_path < OFF || target_path > RING_SPK_HP)
+		return -EINVAL;
+	if (force_spk_hp && target_path != OFF)
+		target_path = SPK_HP;
 	rk817->playback_path = target_path;
 
 	DBG("%s : set playback_path %ld, pre_path %ld\n",
@@ -651,13 +782,17 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 
 	switch (rk817->playback_path) {
 	case OFF:
-		if (pre_path != OFF && pre_path != HP_PATH) {
+		if (pre_path != OFF && pre_path != HP_PATH &&
+		    pre_path != HP_NO_MIC && pre_path != RING_HP &&
+		    pre_path != RING_HP_NO_MIC) {
 			rk817_codec_power_down(component, RK817_CODEC_PLAYBACK);
 			if (rk817->capture_path == 0)
 				rk817_codec_power_down(component, RK817_CODEC_ALL);
 		}
 		break;
+	case RCV:
 	case SPK_PATH:
+	case RING_SPK:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
 		if (rk817->out_l2spk_r2hp) {
@@ -692,7 +827,7 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 			/* CLASS D mode */
 			snd_soc_component_write(component,
 						RK817_CODEC_DDAC_MUTE_MIXCTL,
-						0x10);
+						CLASSD_MIXCTL);
 			/* CLASS D enable */
 			snd_soc_component_write(component,
 						RK817_CODEC_ACLASSD_CFG1,
@@ -718,8 +853,13 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 		}
 		break;
 	case HP_PATH:
+	case HP_NO_MIC:
+	case RING_HP:
+	case RING_HP_NO_MIC:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
+		/* Do not leave the speaker amplifier powered on the HP path. */
+		snd_soc_component_write(component, RK817_CODEC_ACLASSD_CFG1, 0x69);
 		/* HP_CP_EN , CP 2.3V */
 		snd_soc_component_write(component, RK817_CODEC_AHP_CP, 0x11);
 		/* power on HP two stage opamp ,HP amplitude 0db */
@@ -732,7 +872,10 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 					      RK817_CODEC_DDAC_MUTE_MIXCTL,
 					      DACMT_ENABLE, DACMT_DISABLE);
 		break;
+	case BT:
+		break;
 	case SPK_HP:
+	case RING_SPK_HP:
 		if (pre_path == OFF)
 			rk817_codec_power_up(component, RK817_CODEC_PLAYBACK);
 
@@ -750,7 +893,7 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 			/* CLASS D mode */
 			snd_soc_component_write(component,
 						RK817_CODEC_DDAC_MUTE_MIXCTL,
-						0x10);
+						CLASSD_MIXCTL);
 			/* CLASS D enable */
 			snd_soc_component_write(component,
 						RK817_CODEC_ACLASSD_CFG1,
@@ -765,6 +908,12 @@ static int rk817_playback_path_config(struct snd_soc_component *component,
 		return -EINVAL;
 	}
 
+	volume = rk817_active_path_volume(rk817);
+	if (volume >= 0) {
+		if (rk817->hw_master_mode)
+			volume = MASTER_VOLUME_MAX - rk817->master_volume;
+		return rk817_write_volume(component, volume);
+	}
 	return 0;
 }
 
@@ -776,7 +925,9 @@ static int rk817_playback_path_get(struct snd_kcontrol *kcontrol,
 
 	DBG("%s : playback_path %ld\n", __func__, rk817->playback_path);
 
+	mutex_lock(&rk817->volume_lock);
 	ucontrol->value.integer.value[0] = rk817->playback_path;
+	mutex_unlock(&rk817->volume_lock);
 
 	return 0;
 }
@@ -786,15 +937,18 @@ static int rk817_playback_path_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	long target = ucontrol->value.integer.value[0];
+	int ret = 0;
 
-	if (rk817->playback_path == ucontrol->value.integer.value[0]) {
-		DBG("%s : playback_path is not changed!\n",
-		    __func__);
-		return 0;
-	}
-
-	return rk817_playback_path_config(component, rk817->playback_path,
-					  ucontrol->value.integer.value[0]);
+	if (target < OFF || target > RING_SPK_HP)
+		return -EINVAL;
+	if (force_spk_hp && target != OFF)
+		target = SPK_HP;
+	mutex_lock(&rk817->volume_lock);
+	if (rk817->playback_path != target)
+		ret = rk817_playback_path_config(component, rk817->playback_path, target);
+	mutex_unlock(&rk817->volume_lock);
+	return ret;
 }
 
 static int rk817_capture_path_config(struct snd_soc_component *component,
@@ -802,6 +956,8 @@ static int rk817_capture_path_config(struct snd_soc_component *component,
 {
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
 
+	if (target_path < MIC_OFF || target_path > BT_SCO_MIC)
+		return -EINVAL;
 	rk817->capture_path = target_path;
 
 	DBG("%s : set capture_path %ld, pre_path %ld\n", __func__,
@@ -863,6 +1019,43 @@ static int rk817_capture_path_config(struct snd_soc_component *component,
 						      PWD_PGA_R_MASK,
 						      PWD_PGA_R_EN);
 		}
+		break;
+	case HANDS_FREE_MIC:
+		if (pre_path == MIC_OFF)
+			rk817_codec_power_up(component, RK817_CODEC_CAPTURE);
+
+		if (rk817->adc_for_loopback) {
+			/* don't need to gain when adc use for loopback */
+			snd_soc_component_update_bits(component,
+						      RK817_CODEC_AMIC_CFG0,
+						      0xf,
+						      0x0);
+			snd_soc_component_write(component,
+						RK817_CODEC_DMIC_PGA_GAIN,
+						0x66);
+			snd_soc_component_write(component,
+						RK817_CODEC_DADC_VOLL,
+						0x00);
+			snd_soc_component_write(component,
+						RK817_CODEC_DADC_VOLR,
+						0x00);
+			break;
+		}
+		if (!rk817->mic_in_differential) {
+			snd_soc_component_write(component,
+						RK817_CODEC_DADC_VOLL,
+						0xff);
+			snd_soc_component_update_bits(component,
+						      RK817_CODEC_AADC_CFG0,
+						      ADC_L_PWD_MASK,
+						      ADC_L_PWD_EN);
+			snd_soc_component_update_bits(component,
+						      RK817_CODEC_AMIC_CFG0,
+						      PWD_PGA_L_MASK,
+						      PWD_PGA_L_EN);
+		}
+		break;
+	case BT_SCO_MIC:
 		break;
 	default:
 		return -EINVAL;
@@ -989,9 +1182,13 @@ static int darkosen_playback_vol_get(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
-	unsigned int reg_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
-	unsigned int reg_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	unsigned int reg_l, reg_r;
 	int i;
+
+	mutex_lock(&rk817->volume_lock);
+	reg_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
+	reg_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
 
 	ucontrol->value.integer.value[0] = 0;
 	ucontrol->value.integer.value[1] = 0;
@@ -1009,6 +1206,7 @@ static int darkosen_playback_vol_get(struct snd_kcontrol *kcontrol,
 		}
 	}
 
+	mutex_unlock(&rk817->volume_lock);
 	return 0;
 }
 
@@ -1016,6 +1214,7 @@ static int darkosen_playback_vol_put(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
 	unsigned int pos_l = ucontrol->value.integer.value[0];
 	unsigned int pos_r = ucontrol->value.integer.value[1];
 	unsigned int old_l, old_r;
@@ -1023,6 +1222,7 @@ static int darkosen_playback_vol_put(struct snd_kcontrol *kcontrol,
 	if (pos_l > 237 || pos_r > 237)
 		return -EINVAL;
 
+	mutex_lock(&rk817->volume_lock);
 	old_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
 	old_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
 
@@ -1031,11 +1231,28 @@ static int darkosen_playback_vol_put(struct snd_kcontrol *kcontrol,
 	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR,
 				darkosen_vol_curve_tbl[pos_r]);
 
+	mutex_unlock(&rk817->volume_lock);
 	return (darkosen_vol_curve_tbl[pos_l] != old_l ||
 		darkosen_vol_curve_tbl[pos_r] != old_r) ? 1 : 0;
 }
 
 static struct snd_kcontrol_new rk817_snd_controls[] = {
+	SOC_DOUBLE_R_EXT_TLV("Master Playback Volume", RK817_CODEC_DDAC_VOLL,
+			     RK817_CODEC_DDAC_VOLR, 0, MASTER_VOLUME_MAX, 1,
+			     rk817_master_get, rk817_master_put, rk817_master_tlv),
+	/*
+	 * Same DAC volume exposed under a second name. ALSA's simple mixer
+	 * trims the " Volume" suffix, so this surfaces as the simple control
+	 * "Playback" - the name dArkOS's ogage hotkey daemon drives with
+	 * "amixer sset Playback". "Master" (above) is what EmulationStation
+	 * reads. Both share rk817_master_get/put, so they track one volume.
+	 */
+	SOC_DOUBLE_R_EXT_TLV("Playback Volume", RK817_CODEC_DDAC_VOLL,
+			     RK817_CODEC_DDAC_VOLR, 0, MASTER_VOLUME_MAX, 1,
+			     rk817_master_get, rk817_master_put, rk817_master_tlv),
+	SOC_SINGLE_BOOL_EXT("Playback Hardware Master Switch", 0,
+			    rk817_master_switch_get, rk817_master_switch_put),
+
 	SOC_ENUM_EXT("Playback Path", rk817_playback_path_type,
 		     rk817_playback_path_get, rk817_playback_path_put),
 
@@ -1062,7 +1279,7 @@ static struct snd_kcontrol_new rk817_snd_controls[] = {
 	SOC_SINGLE_TLV("HP Output Gain", RK817_CODEC_AHP_CFG0,
 		       3, 3, 0, hp_out_tlv),
 
-	SOC_DOUBLE_EXT("Playback Volume", 0, 0, 1, 237, 0,
+	SOC_DOUBLE_EXT("Native Curve Playback Volume", 0, 0, 1, 237, 0,
 		       darkosen_playback_vol_get, darkosen_playback_vol_put),
 
 	SOC_DOUBLE_R("Record Volume", RK817_CODEC_DADC_VOLL,
@@ -1107,6 +1324,17 @@ static int rk817_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	return 0;
 }
 
+static void rk817_repower_playback(struct snd_soc_component *component)
+{
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	long path = rk817->playback_path;
+
+	if (path == OFF)
+		return;
+	rk817_playback_path_config(component, path, OFF);
+	rk817_playback_path_config(component, OFF, path);
+}
+
 static int rk817_hw_params(struct snd_pcm_substream *substream,
 			   struct snd_pcm_hw_params *params,
 			    struct snd_soc_dai *dai)
@@ -1121,6 +1349,12 @@ static int rk817_hw_params(struct snd_pcm_substream *substream,
 	DBG("%s : pre rate = %d, cur sample rate = %dHz, stream = %s\n",
 	    __func__, rk817->rate, rate,
 	    substream->stream == SNDRV_PCM_STREAM_PLAYBACK ? "PLAYBACK" : "CAPTURE");
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		mutex_lock(&rk817->volume_lock);
+		rk817_repower_playback(component);
+		mutex_unlock(&rk817->volume_lock);
+		}
 
 	if (rk817->chip_ver <= 0x4) {
 		DBG("%s: 0x4 and previous versions\n", __func__);
@@ -1215,6 +1449,7 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
 
 	DBG("%s %d\n", __func__, mute);
+	mutex_lock(&rk817->volume_lock);
 
 	if (mute) {
 		rk817_codec_ctl_gpio(rk817, CODEC_SET_SPK, 0);
@@ -1234,7 +1469,9 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 					      DACMT_ENABLE, DACMT_DISABLE);
 
 		switch (rk817->playback_path) {
+		case RCV:
 		case SPK_PATH:
+		case RING_SPK:
 			if (rk817->out_l2spk_r2hp) {
 				snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 						PWD_DACBIAS_ON | PWD_DACD_ON |
@@ -1252,6 +1489,9 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 			rk817_codec_ctl_gpio(rk817, CODEC_SET_HP, 0);
 			break;
 		case HP_PATH:
+		case HP_NO_MIC:
+		case RING_HP:
+		case RING_HP_NO_MIC:
 			snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 					PWD_DACBIAS_ON | PWD_DACD_DOWN |
 					PWD_DACL_ON | PWD_DACR_ON);
@@ -1259,6 +1499,7 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 			rk817_codec_ctl_gpio(rk817, CODEC_SET_HP, 1);
 			break;
 		case SPK_HP:
+		case RING_SPK_HP:
 			snd_soc_component_write(component, RK817_CODEC_ADAC_CFG1,
 					PWD_DACBIAS_ON | PWD_DACD_ON |
 					PWD_DACL_ON | PWD_DACR_ON);
@@ -1270,6 +1511,7 @@ static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 		}
 	}
 
+	mutex_unlock(&rk817->volume_lock);
 	return 0;
 }
 
@@ -1388,7 +1630,11 @@ static struct snd_soc_dai_driver rk817_dai[] = {
 
 static int rk817_suspend(struct snd_soc_component *component)
 {
+	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+
+	mutex_lock(&rk817->volume_lock);
 	rk817_codec_power_down(component, RK817_CODEC_ALL);
+	mutex_unlock(&rk817->volume_lock);
 	return 0;
 }
 
@@ -1397,6 +1643,7 @@ static int rk817_resume(struct snd_soc_component *component)
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
 	unsigned int vol_l, vol_r;
 
+	mutex_lock(&rk817->volume_lock);
 	/* dArkOSen: save volume, power-up list resets DDAC_VOL to 0x0a */
 	vol_l = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLL);
 	vol_r = snd_soc_component_read(component, RK817_CODEC_DDAC_VOLR);
@@ -1410,6 +1657,7 @@ static int rk817_resume(struct snd_soc_component *component)
 	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLL, vol_l);
 	snd_soc_component_write(component, RK817_CODEC_DDAC_VOLR, vol_r);
 
+	mutex_unlock(&rk817->volume_lock);
 	return 0;
 }
 
@@ -1577,6 +1825,8 @@ static int rk817_codec_parse_dt_property(struct device *dev,
 			of_property_read_bool(node, "use-ext-amplifier");
 
 	rk817->out_l2spk_r2hp = of_property_read_bool(node, "out-l2spk-r2hp");
+	if (of_property_read_bool(node, "rockchip,force-spk-hp"))
+		force_spk_hp = true;
 
 	rk817->adc_for_loopback =
 			of_property_read_bool(node, "adc-for-loopback");
@@ -1617,6 +1867,7 @@ static int rk817_platform_probe(struct platform_device *pdev)
 	if (!rk817_codec_data)
 		return -ENOMEM;
 
+	mutex_init(&rk817_codec_data->volume_lock);
 	platform_set_drvdata(pdev, rk817_codec_data);
 
 	ret = rk817_codec_parse_dt_property(&pdev->dev, rk817_codec_data);
@@ -1625,6 +1876,9 @@ static int rk817_platform_probe(struct platform_device *pdev)
 			__func__, ret);
 		goto err_;
 	}
+
+	rk817_codec_data->master_volume = MASTER_VOLUME_MAX -
+		min(rk817_codec_data->spk_volume, (unsigned int)MASTER_VOLUME_MAX);
 
 	rk817_codec_data->regmap = devm_regmap_init_i2c(rk817->i2c,
 					    &rk817_codec_regmap_config);

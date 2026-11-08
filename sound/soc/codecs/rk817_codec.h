@@ -198,14 +198,23 @@ enum {
 
 enum {
 	OFF,
+	RCV,
 	SPK_PATH,
 	HP_PATH,
+	HP_NO_MIC,
+	BT,
 	SPK_HP,
+	RING_SPK,
+	RING_HP,
+	RING_HP_NO_MIC,
+	RING_SPK_HP,
 };
 
 enum {
 	MIC_OFF,
 	MAIN_MIC,
+	HANDS_FREE_MIC,
+	BT_SCO_MIC,
 };
 
 struct rk817_reg_val_typ {
