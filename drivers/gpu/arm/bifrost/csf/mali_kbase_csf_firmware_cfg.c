@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2020-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,24 +16,23 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
 
 #include <mali_kbase.h>
-#include <mali_kbase_reset_gpu.h>
-#include <linux/version.h>
-
 #include "mali_kbase_csf_firmware_cfg.h"
-#include "mali_kbase_csf_firmware_log.h"
+#include <mali_kbase_reset_gpu.h>
 
 #if CONFIG_SYSFS
 #define CSF_FIRMWARE_CFG_SYSFS_DIR_NAME "firmware_config"
 
-#define CSF_FIRMWARE_CFG_LOG_VERBOSITY_ENTRY_NAME "Log verbosity"
-
-#define CSF_FIRMWARE_CFG_WA_CFG0_ENTRY_NAME "WA_CFG0"
-
 /**
  * struct firmware_config - Configuration item within the MCU firmware
+ *
+ * The firmware may expose configuration options. Each option has a name, the
+ * address where the option is controlled and the minimum and maximum values
+ * that the option can take.
  *
  * @node:        List head linking all options to
  *               kbase_device:csf.firmware_config
@@ -43,24 +41,17 @@
  *               inside CSF_FIRMWARE_CFG_SYSFS_DIR_NAME directory,
  *               representing the configuration option @name.
  * @kobj_inited: kobject initialization state
- * @updatable:   Indicates whether config items can be updated with
- *               FIRMWARE_CONFIG_UPDATE
  * @name:        NUL-terminated string naming the option
  * @address:     The address in the firmware image of the configuration option
  * @min:         The lowest legal value of the configuration option
  * @max:         The maximum legal value of the configuration option
  * @cur_val:     The current value of the configuration option
- *
- * The firmware may expose configuration options. Each option has a name, the
- * address where the option is controlled and the minimum and maximum values
- * that the option can take.
  */
 struct firmware_config {
 	struct list_head node;
 	struct kbase_device *kbdev;
 	struct kobject kobj;
 	bool kobj_inited;
-	bool updatable;
 	char *name;
 	u32 address;
 	u32 min;
@@ -68,26 +59,29 @@ struct firmware_config {
 	u32 cur_val;
 };
 
-#define FW_CFG_ATTR(_name, _mode)                        \
-	struct attribute fw_cfg_attr_##_name = {         \
-		.name = __stringify(_name),              \
-		.mode = VERIFY_OCTAL_PERMISSIONS(_mode), \
+#define FW_CFG_ATTR(_name, _mode)					\
+	struct attribute fw_cfg_attr_##_name = {			\
+			.name = __stringify(_name),			\
+			.mode = VERIFY_OCTAL_PERMISSIONS(_mode),	\
 	}
 
-static FW_CFG_ATTR(min, 0444);
-static FW_CFG_ATTR(max, 0444);
-static FW_CFG_ATTR(cur, 0644);
+static FW_CFG_ATTR(min, S_IRUGO);
+static FW_CFG_ATTR(max, S_IRUGO);
+static FW_CFG_ATTR(cur, S_IRUGO | S_IWUSR);
 
 static void fw_cfg_kobj_release(struct kobject *kobj)
 {
-	struct firmware_config *config = container_of(kobj, struct firmware_config, kobj);
+	struct firmware_config *config =
+		container_of(kobj, struct firmware_config, kobj);
 
 	kfree(config);
 }
 
-static ssize_t show_fw_cfg(struct kobject *kobj, struct attribute *attr, char *buf)
+static ssize_t show_fw_cfg(struct kobject *kobj,
+	struct attribute *attr, char *buf)
 {
-	struct firmware_config *config = container_of(kobj, struct firmware_config, kobj);
+	struct firmware_config *config =
+		container_of(kobj, struct firmware_config, kobj);
 	struct kbase_device *kbdev = config->kbdev;
 	u32 val = 0;
 
@@ -105,17 +99,22 @@ static ssize_t show_fw_cfg(struct kobject *kobj, struct attribute *attr, char *b
 		val = config->cur_val;
 		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 	} else {
-		dev_warn(kbdev->dev, "Unexpected read from entry %s/%s", config->name, attr->name);
+		dev_warn(kbdev->dev,
+			"Unexpected read from entry %s/%s",
+			config->name, attr->name);
 		return -EINVAL;
 	}
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", val);
+	return snprintf(buf, PAGE_SIZE, "%u\n", val);
 }
 
-static ssize_t store_fw_cfg(struct kobject *kobj, struct attribute *attr, const char *buf,
-			    size_t count)
+static ssize_t store_fw_cfg(struct kobject *kobj,
+	struct attribute *attr,
+	const char *buf,
+	size_t count)
 {
-	struct firmware_config *config = container_of(kobj, struct firmware_config, kobj);
+	struct firmware_config *config =
+		container_of(kobj, struct firmware_config, kobj);
 	struct kbase_device *kbdev = config->kbdev;
 
 	if (!kbdev)
@@ -123,7 +122,7 @@ static ssize_t store_fw_cfg(struct kobject *kobj, struct attribute *attr, const 
 
 	if (attr == &fw_cfg_attr_cur) {
 		unsigned long flags;
-		u32 val, cur_val;
+		u32 val;
 		int ret = kstrtouint(buf, 0, &val);
 
 		if (ret) {
@@ -134,33 +133,23 @@ static ssize_t store_fw_cfg(struct kobject *kobj, struct attribute *attr, const 
 			return -EINVAL;
 		}
 
-		if (!strcmp(config->name, CSF_FIRMWARE_CFG_WA_CFG0_ENTRY_NAME))
-			return -EPERM;
-
 		if ((val < config->min) || (val > config->max))
 			return -EINVAL;
 
 		spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-
-		cur_val = config->cur_val;
-		if (cur_val == val) {
+		if (config->cur_val == val) {
 			spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-			return (ssize_t)count;
+			return count;
 		}
 
-		/* If configuration update cannot be performed with
-		 * FIRMWARE_CONFIG_UPDATE then we need to do a
-		 * silent reset before we update the memory.
+		/*
+		 * If there is already a GPU reset pending then inform
+		 * the User to retry the write.
 		 */
-		if (!config->updatable) {
-			/*
-			 * If there is already a GPU reset pending then inform
-			 * the User to retry the write.
-			 */
-			if (kbase_reset_gpu_silent(kbdev)) {
-				spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-				return -EAGAIN;
-			}
+		if (kbase_reset_gpu_silent(kbdev)) {
+			spin_unlock_irqrestore(
+				&kbdev->hwaccess_lock, flags);
+			return -EAGAIN;
 		}
 
 		/*
@@ -172,44 +161,22 @@ static ssize_t store_fw_cfg(struct kobject *kobj, struct attribute *attr, const 
 		 * in the RONLY section of firmware image, which is not
 		 * reloaded on firmware reboot due to GPU reset.
 		 */
-		kbase_csf_update_firmware_memory(kbdev, config->address, val);
+		kbase_csf_update_firmware_memory(
+			kbdev, config->address, val);
 
 		config->cur_val = val;
-
 		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 
-		/* Enable FW logging only if Log verbosity is non-zero */
-		if (!strcmp(config->name, CSF_FIRMWARE_CFG_LOG_VERBOSITY_ENTRY_NAME) &&
-		    (!cur_val || !val)) {
-			ret = kbase_csf_firmware_log_toggle_logging_calls(kbdev, val);
-			if (ret) {
-				/* Undo FW configuration changes */
-				spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-				config->cur_val = cur_val;
-				kbase_csf_update_firmware_memory(kbdev, config->address, cur_val);
-				spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-				return ret;
-			}
-		}
-
-		/* If we can update the config without firmware reset then
-		 * we need to just trigger FIRMWARE_CONFIG_UPDATE.
-		 */
-		if (config->updatable) {
-			ret = kbase_csf_trigger_firmware_config_update(kbdev);
-			if (ret)
-				return ret;
-		}
-
 		/* Wait for the config update to take effect */
-		if (!config->updatable)
-			kbase_reset_gpu_wait(kbdev);
+		kbase_reset_gpu_wait(kbdev);
 	} else {
-		dev_warn(kbdev->dev, "Unexpected write to entry %s/%s", config->name, attr->name);
+		dev_warn(kbdev->dev,
+			"Unexpected write to entry %s/%s",
+			config->name, attr->name);
 		return -EINVAL;
 	}
 
-	return (ssize_t)count;
+	return count;
 }
 
 static const struct sysfs_ops fw_cfg_ops = {
@@ -223,29 +190,23 @@ static struct attribute *fw_cfg_attrs[] = {
 	&fw_cfg_attr_cur,
 	NULL,
 };
-#if (KERNEL_VERSION(5, 2, 0) <= LINUX_VERSION_CODE)
-ATTRIBUTE_GROUPS(fw_cfg);
-#endif
 
 static struct kobj_type fw_cfg_kobj_type = {
 	.release = &fw_cfg_kobj_release,
 	.sysfs_ops = &fw_cfg_ops,
-#if (KERNEL_VERSION(5, 2, 0) <= LINUX_VERSION_CODE)
-	.default_groups = fw_cfg_groups,
-#else
 	.default_attrs = fw_cfg_attrs,
-#endif
 };
 
 int kbase_csf_firmware_cfg_init(struct kbase_device *kbdev)
 {
 	struct firmware_config *config;
 
-	kbdev->csf.fw_cfg_kobj =
-		kobject_create_and_add(CSF_FIRMWARE_CFG_SYSFS_DIR_NAME, &kbdev->dev->kobj);
+	kbdev->csf.fw_cfg_kobj = kobject_create_and_add(
+		CSF_FIRMWARE_CFG_SYSFS_DIR_NAME, &kbdev->dev->kobj);
 	if (!kbdev->csf.fw_cfg_kobj) {
 		kobject_put(kbdev->csf.fw_cfg_kobj);
-		dev_err(kbdev->dev, "Creation of %s sysfs sub-directory failed\n",
+		dev_err(kbdev->dev,
+			"Creation of %s sysfs sub-directory failed\n",
 			CSF_FIRMWARE_CFG_SYSFS_DIR_NAME);
 		return -ENOMEM;
 	}
@@ -253,25 +214,15 @@ int kbase_csf_firmware_cfg_init(struct kbase_device *kbdev)
 	list_for_each_entry(config, &kbdev->csf.firmware_config, node) {
 		int err;
 
-		kbase_csf_read_firmware_memory(kbdev, config->address, &config->cur_val);
+		kbase_csf_read_firmware_memory(kbdev, config->address,
+			&config->cur_val);
 
-		if (!strcmp(config->name, CSF_FIRMWARE_CFG_LOG_VERBOSITY_ENTRY_NAME) &&
-		    (config->cur_val)) {
-			err = kbase_csf_firmware_log_toggle_logging_calls(config->kbdev,
-									  config->cur_val);
-
-			if (err) {
-				kobject_put(&config->kobj);
-				dev_err(kbdev->dev, "Failed to enable logging (result: %d)", err);
-				return err;
-			}
-		}
-
-		err = kobject_init_and_add(&config->kobj, &fw_cfg_kobj_type, kbdev->csf.fw_cfg_kobj,
-					   "%s", config->name);
+		err = kobject_init_and_add(&config->kobj, &fw_cfg_kobj_type,
+				kbdev->csf.fw_cfg_kobj, "%s", config->name);
 		if (err) {
 			kobject_put(&config->kobj);
-			dev_err(kbdev->dev, "Creation of %s sysfs sub-directory failed\n",
+			dev_err(kbdev->dev,
+				"Creation of %s sysfs sub-directory failed\n",
 				config->name);
 			return err;
 		}
@@ -287,8 +238,8 @@ void kbase_csf_firmware_cfg_term(struct kbase_device *kbdev)
 	while (!list_empty(&kbdev->csf.firmware_config)) {
 		struct firmware_config *config;
 
-		config =
-			list_first_entry(&kbdev->csf.firmware_config, struct firmware_config, node);
+		config = list_first_entry(&kbdev->csf.firmware_config,
+				struct firmware_config, node);
 		list_del(&config->node);
 
 		if (config->kobj_inited) {
@@ -303,13 +254,12 @@ void kbase_csf_firmware_cfg_term(struct kbase_device *kbdev)
 }
 
 int kbase_csf_firmware_cfg_option_entry_parse(struct kbase_device *kbdev,
-					      const struct kbase_csf_mcu_fw *const fw,
-					      const u32 *entry, unsigned int size, bool updatable)
+		const struct firmware *fw,
+		const u32 *entry, unsigned int size)
 {
 	const char *name = (char *)&entry[3];
 	struct firmware_config *config;
 	const unsigned int name_len = size - CONFIGURATION_ENTRY_NAME_OFFSET;
-	CSTD_UNUSED(fw);
 
 	/* Allocate enough space for struct firmware_config and the
 	 * configuration option name (with NULL termination)
@@ -320,8 +270,7 @@ int kbase_csf_firmware_cfg_option_entry_parse(struct kbase_device *kbdev,
 		return -ENOMEM;
 
 	config->kbdev = kbdev;
-	config->updatable = updatable;
-	config->name = (char *)(config + 1);
+	config->name = (char *)(config+1);
 	config->address = entry[0];
 	config->min = entry[1];
 	config->max = entry[2];
@@ -331,80 +280,12 @@ int kbase_csf_firmware_cfg_option_entry_parse(struct kbase_device *kbdev,
 
 	list_add(&config->node, &kbdev->csf.firmware_config);
 
-	dev_dbg(kbdev->dev, "Configuration option '%s' at 0x%x range %u-%u", config->name,
-		config->address, config->min, config->max);
+	dev_dbg(kbdev->dev, "Configuration option '%s' at 0x%x range %u-%u",
+			config->name, config->address,
+			config->min, config->max);
 
 	return 0;
 }
-
-int kbase_csf_firmware_cfg_fw_wa_enable(struct kbase_device *kbdev)
-{
-	struct firmware_config *config;
-
-	/* "quirks_ext" property is optional */
-	if (!kbdev->csf.quirks_ext)
-		return 0;
-
-	list_for_each_entry(config, &kbdev->csf.firmware_config, node) {
-		if (strcmp(config->name, CSF_FIRMWARE_CFG_WA_CFG0_ENTRY_NAME))
-			continue;
-		dev_info(kbdev->dev, "External quirks 0: 0x%08x", kbdev->csf.quirks_ext[0]);
-		kbase_csf_update_firmware_memory(kbdev, config->address, kbdev->csf.quirks_ext[0]);
-		return 0;
-	}
-
-	return -ENOENT;
-}
-
-int kbase_csf_firmware_cfg_fw_wa_init(struct kbase_device *kbdev)
-{
-	int ret;
-	int entry_count;
-	size_t entry_bytes;
-
-	/* "quirks-ext" property is optional and may have no value.
-	 * Also try fallback "quirks_ext" property if it doesn't exist.
-	 */
-	entry_count = of_property_count_u32_elems(kbdev->dev->of_node, "quirks-ext");
-
-	if (entry_count < 0)
-		entry_count = of_property_count_u32_elems(kbdev->dev->of_node, "quirks_ext");
-
-	if (entry_count < 0)
-		return 0;
-
-	entry_bytes = (size_t)entry_count * sizeof(u32);
-	kbdev->csf.quirks_ext = kzalloc(entry_bytes, GFP_KERNEL);
-	if (!kbdev->csf.quirks_ext)
-		return -ENOMEM;
-
-	ret = of_property_read_u32_array(kbdev->dev->of_node, "quirks-ext", kbdev->csf.quirks_ext,
-					 (size_t)entry_count);
-
-	if (ret == -EINVAL)
-		ret = of_property_read_u32_array(kbdev->dev->of_node, "quirks_ext",
-						 kbdev->csf.quirks_ext, (size_t)entry_count);
-
-	if (ret == -EINVAL || ret == -ENODATA) {
-		/* This is unexpected since the property is already accessed for counting the number
-		 * of its elements.
-		 */
-		dev_err(kbdev->dev, "\"quirks_ext\" DTB property data read failed");
-		return ret;
-	}
-	if (ret == -EOVERFLOW) {
-		dev_err(kbdev->dev, "\"quirks_ext\" DTB property data size exceeds 32 bits");
-		return ret;
-	}
-
-	return kbase_csf_firmware_cfg_fw_wa_enable(kbdev);
-}
-
-void kbase_csf_firmware_cfg_fw_wa_term(struct kbase_device *kbdev)
-{
-	kfree(kbdev->csf.quirks_ext);
-}
-
 #else
 int kbase_csf_firmware_cfg_init(struct kbase_device *kbdev)
 {
@@ -417,20 +298,9 @@ void kbase_csf_firmware_cfg_term(struct kbase_device *kbdev)
 }
 
 int kbase_csf_firmware_cfg_option_entry_parse(struct kbase_device *kbdev,
-					      const struct kbase_csf_mcu_fw *const fw,
-					      const u32 *entry, unsigned int size)
+		const struct firmware *fw,
+		const u32 *entry, unsigned int size)
 {
 	return 0;
 }
-
-int kbase_csf_firmware_cfg_fw_wa_enable(struct kbase_device *kbdev)
-{
-	return 0;
-}
-
-int kbase_csf_firmware_cfg_fw_wa_init(struct kbase_device *kbdev)
-{
-	return 0;
-}
-
 #endif /* CONFIG_SYSFS */

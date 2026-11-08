@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2014-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2014, 2016, 2019-2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,12 +16,14 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
 
 #include "mali_kbase.h"
 #include "mali_kbase_regs_history_debugfs.h"
 
-#if defined(CONFIG_DEBUG_FS) && !IS_ENABLED(CONFIG_MALI_BIFROST_NO_MALI)
+#if defined(CONFIG_DEBUG_FS) && !defined(CONFIG_MALI_BIFROST_NO_MALI)
 
 #include <linux/debugfs.h>
 
@@ -36,7 +37,7 @@
  * If resizing fails for any reason (e.g., could not allocate memory, invalid
  * buffer size) then the original buffer will be kept intact.
  *
- * Return: 0 if the buffer was resized, failure otherwise
+ * @return 0 if the buffer was resized, failure otherwise
  */
 static int kbase_io_history_resize(struct kbase_io_history *h, u16 new_size)
 {
@@ -93,7 +94,8 @@ void kbase_io_history_term(struct kbase_io_history *h)
 	h->buf = NULL;
 }
 
-void kbase_io_history_add(struct kbase_io_history *h, void __iomem const *addr, u32 value, u8 write)
+void kbase_io_history_add(struct kbase_io_history *h,
+		void __iomem const *addr, u32 value, u8 write)
 {
 	struct kbase_io_access *io;
 	unsigned long flags;
@@ -116,7 +118,7 @@ void kbase_io_history_add(struct kbase_io_history *h, void __iomem const *addr, 
 void kbase_io_history_dump(struct kbase_device *kbdev)
 {
 	struct kbase_io_history *const h = &kbdev->io_history;
-	size_t i;
+	u16 i;
 	size_t iters;
 	unsigned long flags;
 
@@ -127,13 +129,15 @@ void kbase_io_history_dump(struct kbase_device *kbdev)
 
 	dev_err(kbdev->dev, "Register IO History:");
 	iters = (h->size > h->count) ? h->count : h->size;
-	dev_err(kbdev->dev, "Last %zu register accesses of %zu total:\n", iters, h->count);
+	dev_err(kbdev->dev, "Last %zu register accesses of %zu total:\n", iters,
+			h->count);
 	for (i = 0; i < iters; ++i) {
-		struct kbase_io_access *io = &h->buf[(h->count - iters + i) % h->size];
+		struct kbase_io_access *io =
+			&h->buf[(h->count - iters + i) % h->size];
 		char const access = (io->addr & 1) ? 'w' : 'r';
 
-		dev_err(kbdev->dev, "%6zu: %c: reg 0x%16pK val %08x\n", i, access,
-			(void *)(io->addr & ~(uintptr_t)0x1), io->value);
+		dev_err(kbdev->dev, "%6i: %c: reg 0x%016lx val %08x\n", i,
+			access, (unsigned long)(io->addr & ~0x1), io->value);
 	}
 
 	spin_unlock_irqrestore(&h->lock, flags);
@@ -155,8 +159,12 @@ static int regs_history_size_set(void *data, u64 val)
 	return kbase_io_history_resize(h, (u16)val);
 }
 
-DEFINE_DEBUGFS_ATTRIBUTE(regs_history_size_fops, regs_history_size_get, regs_history_size_set,
-			 "%llu\n");
+
+DEFINE_SIMPLE_ATTRIBUTE(regs_history_size_fops,
+		regs_history_size_get,
+		regs_history_size_set,
+		"%llu\n");
+
 
 /**
  * regs_history_show - show callback for the register access history file.
@@ -166,16 +174,15 @@ DEFINE_DEBUGFS_ATTRIBUTE(regs_history_size_fops, regs_history_size_get, regs_his
  *
  * This function is called to dump all recent accesses to the GPU registers.
  *
- * Return: 0 if successfully prints data in debugfs entry file, failure otherwise
+ * @return 0 if successfully prints data in debugfs entry file, failure
+ * otherwise
  */
 static int regs_history_show(struct seq_file *sfile, void *data)
 {
 	struct kbase_io_history *const h = sfile->private;
-	size_t i;
+	u16 i;
 	size_t iters;
 	unsigned long flags;
-
-	CSTD_UNUSED(data);
 
 	if (!h->enabled) {
 		seq_puts(sfile, "The register access history is disabled\n");
@@ -185,13 +192,15 @@ static int regs_history_show(struct seq_file *sfile, void *data)
 	spin_lock_irqsave(&h->lock, flags);
 
 	iters = (h->size > h->count) ? h->count : h->size;
-	seq_printf(sfile, "Last %zu register accesses of %zu total:\n", iters, h->count);
+	seq_printf(sfile, "Last %zu register accesses of %zu total:\n", iters,
+			h->count);
 	for (i = 0; i < iters; ++i) {
-		struct kbase_io_access *io = &h->buf[(h->count - iters + i) % h->size];
+		struct kbase_io_access *io =
+			&h->buf[(h->count - iters + i) % h->size];
 		char const access = (io->addr & 1) ? 'w' : 'r';
 
-		seq_printf(sfile, "%6zu: %c: reg 0x%16pK val %08x\n", i, access,
-			   (void *)(io->addr & ~(uintptr_t)0x1), io->value);
+		seq_printf(sfile, "%6i: %c: reg 0x%016lx val %08x\n", i, access,
+				(unsigned long)(io->addr & ~0x1), io->value);
 	}
 
 	spin_unlock_irqrestore(&h->lock, flags);
@@ -206,7 +215,7 @@ out:
  * @in: &struct inode pointer
  * @file: &struct file pointer
  *
- * Return: file descriptor
+ * @return file descriptor
  */
 static int regs_history_open(struct inode *in, struct file *file)
 {
@@ -223,11 +232,14 @@ static const struct file_operations regs_history_fops = {
 
 void kbasep_regs_history_debugfs_init(struct kbase_device *kbdev)
 {
-	debugfs_create_bool("regs_history_enabled", 0644, kbdev->mali_debugfs_directory,
-			    &kbdev->io_history.enabled);
-	debugfs_create_file("regs_history_size", 0644, kbdev->mali_debugfs_directory,
-			    &kbdev->io_history, &regs_history_size_fops);
-	debugfs_create_file("regs_history", 0444, kbdev->mali_debugfs_directory, &kbdev->io_history,
-			    &regs_history_fops);
+	debugfs_create_bool("regs_history_enabled", S_IRUGO | S_IWUSR,
+			kbdev->mali_debugfs_directory,
+			&kbdev->io_history.enabled);
+	debugfs_create_file("regs_history_size", S_IRUGO | S_IWUSR,
+			kbdev->mali_debugfs_directory,
+			&kbdev->io_history, &regs_history_size_fops);
+	debugfs_create_file("regs_history", S_IRUGO,
+			kbdev->mali_debugfs_directory, &kbdev->io_history,
+			&regs_history_fops);
 }
-#endif /* defined(CONFIG_DEBUG_FS) && !IS_ENABLED(CONFIG_MALI_BIFROST_NO_MALI) */
+#endif /* defined(CONFIG_DEBUG_FS) && !defined(CONFIG_MALI_BIFROST_NO_MALI) */

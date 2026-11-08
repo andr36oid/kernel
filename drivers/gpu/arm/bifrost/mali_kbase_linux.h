@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2010-2024 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2010-2014 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,10 +16,15 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
 
+
+
 /**
- * DOC: Base kernel APIs, Linux implementation.
+ * @file mali_kbase_linux.h
+ * Base kernel APIs, Linux implementation.
  */
 
 #ifndef _KBASE_LINUX_H_
@@ -33,15 +37,10 @@
 #include <linux/module.h>
 #include <linux/atomic.h>
 
-#if IS_ENABLED(MALI_KERNEL_TEST_API)
-#define KBASE_EXPORT_TEST_API(func) EXPORT_SYMBOL(func)
-/* Note: due to the 2-layer macro translation, using the NULL _etype does not
- * compile, and one workaround is to use ERRNO_NULL instead.
- */
-#define KBASE_ALLOW_ERROR_INJECTION_TEST_API(func, etype) ALLOW_ERROR_INJECTION(func, etype)
+#if (defined(MALI_KERNEL_TEST_API) && (1 == MALI_KERNEL_TEST_API))
+	#define KBASE_EXPORT_TEST_API(func) EXPORT_SYMBOL(func)
 #else
-#define KBASE_EXPORT_TEST_API(func)
-#define KBASE_ALLOW_ERROR_INJECTION_TEST_API(func, etype)
+	#define KBASE_EXPORT_TEST_API(func)
 #endif
 
 #define KBASE_EXPORT_SYMBOL(func) EXPORT_SYMBOL(func)

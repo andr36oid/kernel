@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2016-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2016-2018 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,12 +16,14 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
 
 #include <linux/freezer.h>
 #include <uapi/linux/thermal.h>
 #include <linux/thermal.h>
-#if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
+#ifdef CONFIG_DEVFREQ_THERMAL
 #include <linux/devfreq_cooling.h>
 #endif
 #include <linux/of.h>
@@ -34,37 +35,37 @@
 #include "mali_kbase_ipa_simple.h"
 #include "mali_kbase_ipa_debugfs.h"
 
-#if MALI_USE_CSF
-
-/* This is used if the dynamic power for top-level is estimated separately
- * through the counter model. To roughly match the contribution of top-level
- * power in the total dynamic power, when calculated through counter model,
- * this scalar is used for the dynamic coefficient specified in the device tree
- * for simple power model. This value was provided by the HW team after
- * taking all the power data collected and dividing top level power by shader
- * core power and then averaging it across all samples.
- */
-#define TOP_LEVEL_DYN_COEFF_SCALER (3)
-
-#endif /* MALI_USE_CSF */
-
 #if MALI_UNIT_TEST
 
-static int dummy_temp;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
+static unsigned long dummy_temp;
 
-static int kbase_simple_power_model_get_dummy_temp(struct thermal_zone_device *tz, int *temp)
+static int kbase_simple_power_model_get_dummy_temp(
+	struct thermal_zone_device *tz,
+	unsigned long *temp)
 {
-	CSTD_UNUSED(tz);
-
 	*temp = READ_ONCE(dummy_temp);
 	return 0;
 }
+
+#else
+static int dummy_temp;
+
+static int kbase_simple_power_model_get_dummy_temp(
+	struct thermal_zone_device *tz,
+	int *temp)
+{
+	*temp = READ_ONCE(dummy_temp);
+	return 0;
+}
+#endif
 
 /* Intercept calls to the kernel function using a macro */
 #ifdef thermal_zone_get_temp
 #undef thermal_zone_get_temp
 #endif
-#define thermal_zone_get_temp(tz, temp) kbase_simple_power_model_get_dummy_temp(tz, temp)
+#define thermal_zone_get_temp(tz, temp) \
+	kbase_simple_power_model_get_dummy_temp(tz, temp)
 
 void kbase_simple_power_model_set_dummy_temp(int temp)
 {
@@ -129,26 +130,30 @@ static u32 calculate_temp_scaling_factor(s32 ts[4], s64 t)
 	 * Deg^-N, so we need to multiply the last coefficient by 1000.
 	 * Range: -2^63 < res_big < 2^63
 	 */
-	const s64 res_big = ts[3] * t3 /* +/- 2^62 */
-			    + ts[2] * t2 /* +/- 2^55 */
-			    + ts[1] * t /* +/- 2^48 */
-			    + ts[0] * (s64)1000; /* +/- 2^41 */
+	const s64 res_big = ts[3] * t3    /* +/- 2^62 */
+			  + ts[2] * t2    /* +/- 2^55 */
+			  + ts[1] * t     /* +/- 2^48 */
+			  + ts[0] * (s64)1000; /* +/- 2^41 */
 
 	/* Range: -2^60 < res_unclamped < 2^60 */
 	s64 res_unclamped = div_s64(res_big, 1000);
 
 	/* Clamp to range of 0x to 10x the static power */
-	return clamp(res_unclamped, (s64)0, (s64)10000000);
+	return clamp(res_unclamped, (s64) 0, (s64) 10000000);
 }
 
 /* We can't call thermal_zone_get_temp() directly in model_static_coeff(),
  * because we don't know if tz->lock is held in the same thread. So poll it in
- * a separate thread to get around this.
- */
+ * a separate thread to get around this. */
 static int poll_temperature(void *data)
 {
-	struct kbase_ipa_model_simple_data *model_data = (struct kbase_ipa_model_simple_data *)data;
+	struct kbase_ipa_model_simple_data *model_data =
+			(struct kbase_ipa_model_simple_data *) data;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
+	unsigned long temp;
+#else
 	int temp;
+#endif
 
 	set_freezable();
 
@@ -160,9 +165,8 @@ static int poll_temperature(void *data)
 
 			ret = thermal_zone_get_temp(tz, &temp);
 			if (ret) {
-				pr_warn_ratelimited(
-					"Error reading temperature for gpu thermal zone: %d\n",
-					ret);
+				pr_warn_ratelimited("Error reading temperature for gpu thermal zone: %d\n",
+						    ret);
 				temp = FALLBACK_STATIC_TEMPERATURE;
 			}
 		} else {
@@ -183,21 +187,22 @@ static int model_static_coeff(struct kbase_ipa_model *model, u32 *coeffp)
 {
 	u32 temp_scaling_factor;
 	struct kbase_ipa_model_simple_data *model_data =
-		(struct kbase_ipa_model_simple_data *)model->model_data;
+		(struct kbase_ipa_model_simple_data *) model->model_data;
 	u64 coeff_big;
 	int temp;
 
 	temp = READ_ONCE(model_data->current_temperature);
 
 	/* Range: 0 <= temp_scaling_factor < 2^24 */
-	temp_scaling_factor = calculate_temp_scaling_factor(model_data->ts, temp);
+	temp_scaling_factor = calculate_temp_scaling_factor(model_data->ts,
+							    temp);
 
 	/*
 	 * Range: 0 <= coeff_big < 2^52 to avoid overflowing *coeffp. This
 	 * means static_coefficient must be in range
 	 * 0 <= static_coefficient < 2^28.
 	 */
-	coeff_big = (u64)model_data->static_coefficient * (u64)temp_scaling_factor;
+	coeff_big = (u64) model_data->static_coefficient * (u64) temp_scaling_factor;
 	*coeffp = div_u64(coeff_big, 1000000);
 
 	return 0;
@@ -206,22 +211,9 @@ static int model_static_coeff(struct kbase_ipa_model *model, u32 *coeffp)
 static int model_dynamic_coeff(struct kbase_ipa_model *model, u32 *coeffp)
 {
 	struct kbase_ipa_model_simple_data *model_data =
-		(struct kbase_ipa_model_simple_data *)model->model_data;
+		(struct kbase_ipa_model_simple_data *) model->model_data;
 
-#if MALI_USE_CSF
-	/* On CSF GPUs, the dynamic power for top-level and shader cores is
-	 * estimated separately. Currently there is a single dynamic
-	 * coefficient value provided in the device tree for simple model.
-	 * As per the discussion with HW team the coefficient value needs to
-	 * be scaled down for top-level to limit its contribution in the
-	 * total dyanmic power.
-	 */
-	coeffp[KBASE_IPA_BLOCK_TYPE_TOP_LEVEL] =
-		model_data->dynamic_coefficient / TOP_LEVEL_DYN_COEFF_SCALER;
-	coeffp[KBASE_IPA_BLOCK_TYPE_SHADER_CORES] = model_data->dynamic_coefficient;
-#else
 	*coeffp = model_data->dynamic_coefficient;
-#endif
 
 	return 0;
 }
@@ -230,30 +222,35 @@ static int add_params(struct kbase_ipa_model *model)
 {
 	int err = 0;
 	struct kbase_ipa_model_simple_data *model_data =
-		(struct kbase_ipa_model_simple_data *)model->model_data;
+			(struct kbase_ipa_model_simple_data *)model->model_data;
 
 	err = kbase_ipa_model_add_param_s32(model, "static-coefficient",
-					    (s32 *)&model_data->static_coefficient, 1, true);
+					    &model_data->static_coefficient,
+					    1, true);
 	if (err)
 		goto end;
 
 	err = kbase_ipa_model_add_param_s32(model, "dynamic-coefficient",
-					    (s32 *)&model_data->dynamic_coefficient, 1, true);
+					    &model_data->dynamic_coefficient,
+					    1, true);
 	if (err)
 		goto end;
 
-	err = kbase_ipa_model_add_param_s32(model, "ts", model_data->ts, 4, true);
+	err = kbase_ipa_model_add_param_s32(model, "ts",
+					    model_data->ts, 4, true);
 	if (err)
 		goto end;
 
-	err = kbase_ipa_model_add_param_string(model, "thermal-zone", model_data->tz_name,
+	err = kbase_ipa_model_add_param_string(model, "thermal-zone",
+					       model_data->tz_name,
 					       sizeof(model_data->tz_name), true);
 	if (err)
 		goto end;
 
 	model_data->temperature_poll_interval_ms = 200;
 	err = kbase_ipa_model_add_param_s32(model, "temp-poll-interval-ms",
-					    &model_data->temperature_poll_interval_ms, 1, false);
+					    &model_data->temperature_poll_interval_ms,
+					    1, false);
 
 end:
 	return err;
@@ -264,14 +261,16 @@ static int kbase_simple_power_model_init(struct kbase_ipa_model *model)
 	int err;
 	struct kbase_ipa_model_simple_data *model_data;
 
-	model_data = kzalloc(sizeof(struct kbase_ipa_model_simple_data), GFP_KERNEL);
+	model_data = kzalloc(sizeof(struct kbase_ipa_model_simple_data),
+			     GFP_KERNEL);
 	if (!model_data)
 		return -ENOMEM;
 
-	model->model_data = (void *)model_data;
+	model->model_data = (void *) model_data;
 
 	model_data->current_temperature = FALLBACK_STATIC_TEMPERATURE;
-	model_data->poll_temperature_thread = kthread_run(poll_temperature, (void *)model_data,
+	model_data->poll_temperature_thread = kthread_run(poll_temperature,
+							  (void *) model_data,
 							  "mali-simple-power-model-temp-poll");
 	if (IS_ERR(model_data->poll_temperature_thread)) {
 		err = PTR_ERR(model_data->poll_temperature_thread);
@@ -292,24 +291,17 @@ static int kbase_simple_power_model_init(struct kbase_ipa_model *model)
 static int kbase_simple_power_model_recalculate(struct kbase_ipa_model *model)
 {
 	struct kbase_ipa_model_simple_data *model_data =
-		(struct kbase_ipa_model_simple_data *)model->model_data;
+			(struct kbase_ipa_model_simple_data *)model->model_data;
 	struct thermal_zone_device *tz;
 
 	lockdep_assert_held(&model->kbdev->ipa.lock);
 
 	if (!strnlen(model_data->tz_name, sizeof(model_data->tz_name))) {
 		model_data->gpu_tz = NULL;
-		dev_warn(model->kbdev->dev,
-			 "No thermal zone specified, will use the default temperature value of %u",
-			 FALLBACK_STATIC_TEMPERATURE);
 	} else {
 		char tz_name[THERMAL_NAME_LENGTH];
-		u32 string_len = strscpy(tz_name, model_data->tz_name, sizeof(tz_name));
 
-		string_len += sizeof(char);
-		/* Make sure that the source string fit into the buffer. */
-		KBASE_DEBUG_ASSERT(string_len <= sizeof(tz_name));
-		CSTD_UNUSED(string_len);
+		strlcpy(tz_name, model_data->tz_name, sizeof(tz_name));
 
 		/* Release ipa.lock so that thermal_list_lock is not acquired
 		 * with ipa.lock held, thereby avoid lock ordering violation
@@ -323,9 +315,8 @@ static int kbase_simple_power_model_recalculate(struct kbase_ipa_model *model)
 		mutex_lock(&model->kbdev->ipa.lock);
 
 		if (IS_ERR_OR_NULL(tz)) {
-			pr_warn_ratelimited(
-				"Error %d getting thermal zone \'%s\', not yet ready?\n",
-				PTR_ERR_OR_ZERO(tz), tz_name);
+			pr_warn_ratelimited("Error %ld getting thermal zone \'%s\', not yet ready?\n",
+					    PTR_ERR(tz), tz_name);
 			return -EPROBE_DEFER;
 		}
 
@@ -347,7 +338,7 @@ static int kbase_simple_power_model_recalculate(struct kbase_ipa_model *model)
 static void kbase_simple_power_model_term(struct kbase_ipa_model *model)
 {
 	struct kbase_ipa_model_simple_data *model_data =
-		(struct kbase_ipa_model_simple_data *)model->model_data;
+			(struct kbase_ipa_model_simple_data *)model->model_data;
 
 	kthread_stop(model_data->poll_temperature_thread);
 
@@ -355,11 +346,11 @@ static void kbase_simple_power_model_term(struct kbase_ipa_model *model)
 }
 
 struct kbase_ipa_model_ops kbase_simple_ipa_model_ops = {
-	.name = "mali-simple-power-model",
-	.init = &kbase_simple_power_model_init,
-	.recalculate = &kbase_simple_power_model_recalculate,
-	.term = &kbase_simple_power_model_term,
-	.get_dynamic_coeff = &model_dynamic_coeff,
-	.get_static_coeff = &model_static_coeff,
+		.name = "mali-simple-power-model",
+		.init = &kbase_simple_power_model_init,
+		.recalculate = &kbase_simple_power_model_recalculate,
+		.term = &kbase_simple_power_model_term,
+		.get_dynamic_coeff = &model_dynamic_coeff,
+		.get_static_coeff = &model_static_coeff,
 };
 KBASE_EXPORT_TEST_API(kbase_simple_ipa_model_ops);

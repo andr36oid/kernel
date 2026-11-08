@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2014-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,45 +16,58 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ *//* SPDX-License-Identifier: GPL-2.0 */
+/*
+ *
+ * (C) COPYRIGHT 2014-2015, 2018, 2019-2020 ARM Limited. All rights reserved.
+ *
+ * This program is free software and is provided to you under the terms of the
+ * GNU General Public License version 2 as published by the Free Software
+ * Foundation, and any use by you of this program is subject to the terms
+ * of such GNU licence.
+ *
+ * A copy of the licence is included with the program, and can also be obtained
+ * from Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+ * Boston, MA  02110-1301, USA.
+ *
  */
 
+
 /**
- * DOC: Base kernel property query backend APIs
+ * Base kernel property query backend APIs
  */
 
 #ifndef _KBASE_HWACCESS_GPUPROPS_H_
 #define _KBASE_HWACCESS_GPUPROPS_H_
 
-#include <mali_kbase_gpuprops_private_types.h>
-
 /**
  * kbase_backend_gpuprops_get() - Fill @regdump with GPU properties read from
  *				  GPU
- * @kbdev: Device pointer
- * @regdump: Pointer to a zero initialised kbasep_gpuprops_regdump structure
+ * @kbdev:	Device pointer
+ * @regdump:	Pointer to struct kbase_gpuprops_regdump structure
  *
  * The caller should ensure that GPU remains powered-on during this function.
  *
  * Return: Zero for succeess or a Linux error code
  */
-int kbase_backend_gpuprops_get(struct kbase_device *kbdev, struct kbasep_gpuprops_regdump *regdump);
+int kbase_backend_gpuprops_get(struct kbase_device *kbdev,
+					struct kbase_gpuprops_regdump *regdump);
 
 /**
- * kbase_backend_gpuprops_get_curr_config() - Fill @curr_config_regdump with
- *                                            relevant GPU properties read from
- *                                            the GPU registers.
- * @kbdev:               Device pointer.
- * @curr_config_regdump: Pointer to struct kbase_current_config_regdump
- *                       structure.
+ * kbase_backend_gpuprops_get_features - Fill @regdump with GPU properties read
+ *                                       from GPU
+ * @kbdev:   Device pointer
+ * @regdump: Pointer to struct kbase_gpuprops_regdump structure
  *
- * The caller should ensure that GPU remains powered-on during this function and
- * the caller must ensure this function returns success before using the values
- * returned in the curr_config_regdump in any part of the kernel.
+ * This function reads GPU properties that are dependent on the hardware
+ * features bitmask. It will power-on the GPU if required.
  *
  * Return: Zero for succeess or a Linux error code
  */
-int kbase_backend_gpuprops_get_curr_config(
-	struct kbase_device *kbdev, struct kbase_current_config_regdump *curr_config_regdump);
+int kbase_backend_gpuprops_get_features(struct kbase_device *kbdev,
+					struct kbase_gpuprops_regdump *regdump);
 
 /**
  * kbase_backend_gpuprops_get_l2_features - Fill @regdump with L2_FEATURES read
@@ -69,6 +81,7 @@ int kbase_backend_gpuprops_get_curr_config(
  * Return: Zero on success, Linux error code on failure
  */
 int kbase_backend_gpuprops_get_l2_features(struct kbase_device *kbdev,
-					   struct kbasep_gpuprops_regdump *regdump);
+					struct kbase_gpuprops_regdump *regdump);
+
 
 #endif /* _KBASE_HWACCESS_GPUPROPS_H_ */

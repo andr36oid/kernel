@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2011-2016, 2018-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2011-2016, 2018-2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,7 +16,11 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
+
+
 
 /*
  * Job Manager backend-specific low-level APIs.
@@ -34,6 +37,21 @@
 #include <device/mali_kbase_device.h>
 
 /**
+ * kbase_job_submit_nolock() - Submit a job to a certain job-slot
+ * @kbdev:	Device pointer
+ * @katom:	Atom to submit
+ * @js:		Job slot to submit on
+ *
+ * The caller must check kbasep_jm_is_submit_slots_free() != false before
+ * calling this.
+ *
+ * The following locking conditions are made on the caller:
+ * - it must hold the hwaccess_lock
+ */
+void kbase_job_submit_nolock(struct kbase_device *kbdev,
+					struct kbase_jd_atom *katom, int js);
+
+/**
  * kbase_job_done_slot() - Complete the head job on a particular job-slot
  * @kbdev:		Device pointer
  * @s:			Job slot
@@ -41,16 +59,26 @@
  * @job_tail:		Job tail address reported by GPU
  * @end_timestamp:	Timestamp of job completion
  */
-void kbase_job_done_slot(struct kbase_device *kbdev, int s, u32 completion_code, u64 job_tail,
-			 ktime_t *end_timestamp);
+void kbase_job_done_slot(struct kbase_device *kbdev, int s, u32 completion_code,
+					u64 job_tail, ktime_t *end_timestamp);
 
-#if IS_ENABLED(CONFIG_GPU_TRACEPOINTS)
-static inline char *kbasep_make_job_slot_string(unsigned int js, char *js_string, size_t js_size)
+#ifdef CONFIG_GPU_TRACEPOINTS
+static inline char *kbasep_make_job_slot_string(int js, char *js_string,
+						size_t js_size)
 {
-	(void)scnprintf(js_string, js_size, "job_slot_%u", js);
+	snprintf(js_string, js_size, "job_slot_%i", js);
 	return js_string;
 }
 #endif
+
+#if !MALI_USE_CSF
+static inline int kbasep_jm_is_js_free(struct kbase_device *kbdev, int js,
+						struct kbase_context *kctx)
+{
+	return !kbase_reg_read(kbdev, JOB_SLOT_REG(js, JS_COMMAND_NEXT));
+}
+#endif
+
 
 /**
  * kbase_job_hw_submit() - Submit a job to the GPU
@@ -63,10 +91,10 @@ static inline char *kbasep_make_job_slot_string(unsigned int js, char *js_string
  *
  * The following locking conditions are made on the caller:
  * - it must hold the hwaccess_lock
- *
- * Return: 0 if the job was successfully submitted to hardware, an error otherwise.
  */
-int kbase_job_hw_submit(struct kbase_device *kbdev, struct kbase_jd_atom *katom, unsigned int js);
+void kbase_job_hw_submit(struct kbase_device *kbdev,
+				struct kbase_jd_atom *katom,
+				int js);
 
 #if !MALI_USE_CSF
 /**
@@ -74,17 +102,19 @@ int kbase_job_hw_submit(struct kbase_device *kbdev, struct kbase_jd_atom *katom,
  *						   on the specified atom
  * @kbdev:		Device pointer
  * @js:			Job slot to stop on
- * @action:		The action to perform, either JS_COMMAND_HARD_STOP or
- *			JS_COMMAND_SOFT_STOP
+ * @action:		The action to perform, either JSn_COMMAND_HARD_STOP or
+ *			JSn_COMMAND_SOFT_STOP
  * @core_reqs:		Core requirements of atom to stop
  * @target_katom:	Atom to stop
  *
  * The following locking conditions are made on the caller:
  * - it must hold the hwaccess_lock
  */
-void kbasep_job_slot_soft_or_hard_stop_do_action(struct kbase_device *kbdev, unsigned int js,
-						 u32 action, base_jd_core_req core_reqs,
-						 struct kbase_jd_atom *target_katom);
+void kbasep_job_slot_soft_or_hard_stop_do_action(struct kbase_device *kbdev,
+					int js,
+					u32 action,
+					base_jd_core_req core_reqs,
+					struct kbase_jd_atom *target_katom);
 #endif /* !MALI_USE_CSF */
 
 /**
@@ -94,8 +124,8 @@ void kbasep_job_slot_soft_or_hard_stop_do_action(struct kbase_device *kbdev, uns
  * @kctx:	Context pointer. May be NULL
  * @katom:	Specific atom to stop. May be NULL
  * @js:		Job slot to hard stop
- * @action:	The action to perform, either JS_COMMAND_HARD_STOP or
- *		JS_COMMAND_SOFT_STOP
+ * @action:	The action to perform, either JSn_COMMAND_HARD_STOP or
+ *		JSn_COMMAND_SOFT_STOP
  *
  * If no context is provided then all jobs on the slot will be soft or hard
  * stopped.
@@ -108,8 +138,11 @@ void kbasep_job_slot_soft_or_hard_stop_do_action(struct kbase_device *kbdev, uns
  *
  * Return: true if an atom was stopped, false otherwise
  */
-bool kbase_backend_soft_hard_stop_slot(struct kbase_device *kbdev, struct kbase_context *kctx,
-				       unsigned int js, struct kbase_jd_atom *katom, u32 action);
+bool kbase_backend_soft_hard_stop_slot(struct kbase_device *kbdev,
+					struct kbase_context *kctx,
+					int js,
+					struct kbase_jd_atom *katom,
+					u32 action);
 
 /**
  * kbase_job_slot_init - Initialise job slot framework

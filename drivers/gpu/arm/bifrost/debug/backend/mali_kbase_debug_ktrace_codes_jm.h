@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2011-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2011-2015,2018-2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,6 +15,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
+ *
+ * SPDX-License-Identifier: GPL-2.0
  *
  */
 
@@ -40,11 +41,11 @@
 int dummy_array[] = {
 #endif
 
-/*
+	/*
 	 * Job Slot management events
 	 */
-/* info_val==irq rawstat at start */
-KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
+	/* info_val==irq rawstat at start */
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	/* info_val==jobs processed */
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ_END),
 	/* In the following:
@@ -56,14 +57,6 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	 */
 	/* info_val==exit code; gpu_addr==chain gpuaddr */
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_JOB_DONE),
-	/* gpu_addr==JS_HEAD read
-	 * info_val==event code
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JM_RETURN_ATOM_TO_JS),
-	/* gpu_addr==JS_HEAD read
-	 * info_val==event code
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JM_MARK_FOR_RETURN_TO_JS),
 	/* gpu_addr==JS_HEAD_NEXT written, info_val==lower 32 bits of
 	 * affinity
 	 */
@@ -73,7 +66,8 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	 *   JS_HEAD on submit
 	 * - otherwise gpu_addr==0
 	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JM_SOFTSTOP), KBASE_KTRACE_CODE_MAKE_CODE(JM_SOFTSTOP_0),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_SOFTSTOP),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_SOFTSTOP_0),
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_SOFTSTOP_1),
 	/* gpu_addr==JS_HEAD read */
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_HARDSTOP),
@@ -88,12 +82,14 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	 * - otherwise gpu_addr==0
 	 */
 	/* gpu_addr==JS_HEAD read */
-	KBASE_KTRACE_CODE_MAKE_CODE(JM_CHECK_HEAD), KBASE_KTRACE_CODE_MAKE_CODE(JM_FLUSH_WORKQS),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_CHECK_HEAD),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_FLUSH_WORKQS),
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_FLUSH_WORKQS_DONE),
 	/* info_val == is_scheduled */
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_ZAP_NON_SCHEDULED),
 	/* info_val == is_scheduled */
-	KBASE_KTRACE_CODE_MAKE_CODE(JM_ZAP_SCHEDULED), KBASE_KTRACE_CODE_MAKE_CODE(JM_ZAP_DONE),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_ZAP_SCHEDULED),
+	KBASE_KTRACE_CODE_MAKE_CODE(JM_ZAP_DONE),
 	/* info_val == nr jobs submitted */
 	KBASE_KTRACE_CODE_MAKE_CODE(JM_SLOT_SOFT_OR_HARD_STOP),
 	/* gpu_addr==JS_HEAD_NEXT last written */
@@ -125,13 +121,6 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_ADD_JOB),
 	/* gpu_addr==last value written/would be written to JS_HEAD */
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_REMOVE_JOB),
-	/* gpu_addr==value to write into JS_HEAD
-	 * info_val==priority of atom as a KBASE_JS_ATOM_SCHED_PRIO_<...> value
-	 * (0 highest)
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_PULL_JOB),
-	/* gpu_addr==value that would be written to JS_HEAD if run again */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_UNPULL_JOB),
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_TRY_SCHEDULE_HEAD_CTX),
 	/* gpu_addr==value to write into JS_HEAD */
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_JOB_DONE_TRY_RUN_NEXT_JOB),
@@ -158,25 +147,6 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_CTX_ATTR_NOW_OFF_CTX),
 	/* info_val == the ctx attribute now off runpool */
 	KBASE_KTRACE_CODE_MAKE_CODE(JS_CTX_ATTR_NOW_OFF_RUNPOOL),
-	/* gpu_addr==value to write into JS_HEAD */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_RETURN_WORKER),
-	/* gpu_addr==value to write into JS_HEAD */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_RETURN_WORKER_END),
-	/* info_val==priority level blocked (0 highest) */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_SLOT_PRIO_BLOCKED),
-	/* info_val==priority level unblocked (0 highest)
-	 * note that the priority level may still be blocked on higher levels
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_SLOT_PRIO_UNBLOCKED),
-	/* gpu_addr==value to write into JS_HEAD
-	 * info_val==priority level unblocked - priorities at this and higher
-	 *           are unblocked (0 highest)
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_SLOT_PRIO_AND_HIGHER_UNBLOCKED),
-	/* gpu_addr==value to write into JS_HEAD
-	 * info_val==priority level blocked (0 highest)
-	 */
-	KBASE_KTRACE_CODE_MAKE_CODE(JS_SLOT_PRIO_IS_BLOCKED),
 	/*
 	 * Scheduler Policy events
 	 */
@@ -200,4 +170,4 @@ KBASE_KTRACE_CODE_MAKE_CODE(JM_IRQ),
 };
 #endif
 
-	/* ***** THE LACK OF HEADER GUARDS IS INTENTIONAL ***** */
+/* ***** THE LACK OF HEADER GUARDS IS INTENTIONAL ***** */

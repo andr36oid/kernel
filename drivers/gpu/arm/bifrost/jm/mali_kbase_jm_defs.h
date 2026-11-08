@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2019-2024 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,7 +16,11 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
+
+
 
 /*
  * Definitions (types, defines, etcs) specific to Job Manager Kbase.
@@ -29,8 +32,6 @@
 
 #include "mali_kbase_js_defs.h"
 
-#include <linux/version_compat_defs.h>
-
 /* Dump Job slot trace on error (only active if KBASE_KTRACE_ENABLE != 0) */
 #define KBASE_KTRACE_DUMP_ON_JOB_SLOT_ERROR 1
 
@@ -41,7 +42,7 @@
  * the GPU actually being reset to give other contexts time for their jobs
  * to be soft-stopped and removed from the hardware before resetting.
  */
-#define ZAP_TIMEOUT 1000
+#define ZAP_TIMEOUT             1000
 
 /*
  * Prevent soft-stops from occurring in scheduling situations
@@ -72,29 +73,31 @@
 #define KBASE_DISABLE_SCHEDULING_HARD_STOPS 0
 
 /* Atom has been previously soft-stopped */
-#define KBASE_KATOM_FLAG_BEEN_SOFT_STOPPED (1U << 1)
+#define KBASE_KATOM_FLAG_BEEN_SOFT_STOPPED (1<<1)
 /* Atom has been previously retried to execute */
-#define KBASE_KATOM_FLAGS_RERUN (1U << 2)
+#define KBASE_KATOM_FLAGS_RERUN (1<<2)
 /* Atom submitted with JOB_CHAIN_FLAG bit set in JS_CONFIG_NEXT register, helps
  * to disambiguate short-running job chains during soft/hard stopping of jobs
  */
-#define KBASE_KATOM_FLAGS_JOBCHAIN (1U << 3)
+#define KBASE_KATOM_FLAGS_JOBCHAIN (1<<3)
 /* Atom has been previously hard-stopped. */
-#define KBASE_KATOM_FLAG_BEEN_HARD_STOPPED (1U << 4)
+#define KBASE_KATOM_FLAG_BEEN_HARD_STOPPED (1<<4)
 /* Atom has caused us to enter disjoint state */
-#define KBASE_KATOM_FLAG_IN_DISJOINT (1U << 5)
+#define KBASE_KATOM_FLAG_IN_DISJOINT (1<<5)
 /* Atom blocked on cross-slot dependency */
-#define KBASE_KATOM_FLAG_X_DEP_BLOCKED (1U << 7)
+#define KBASE_KATOM_FLAG_X_DEP_BLOCKED (1<<7)
 /* Atom has fail dependency on cross-slot dependency */
-#define KBASE_KATOM_FLAG_FAIL_BLOCKER (1U << 8)
+#define KBASE_KATOM_FLAG_FAIL_BLOCKER (1<<8)
 /* Atom is currently in the list of atoms blocked on cross-slot dependencies */
-#define KBASE_KATOM_FLAG_JSCTX_IN_X_DEP_LIST (1U << 9)
+#define KBASE_KATOM_FLAG_JSCTX_IN_X_DEP_LIST (1<<9)
+/* Atom is currently holding a context reference */
+#define KBASE_KATOM_FLAG_HOLDING_CTX_REF (1<<10)
 /* Atom requires GPU to be in protected mode */
-#define KBASE_KATOM_FLAG_PROTECTED (1U << 11)
+#define KBASE_KATOM_FLAG_PROTECTED (1<<11)
 /* Atom has been stored in runnable_tree */
-#define KBASE_KATOM_FLAG_JSCTX_IN_TREE (1U << 12)
+#define KBASE_KATOM_FLAG_JSCTX_IN_TREE (1<<12)
 /* Atom is waiting for L2 caches to power up in order to enter protected mode */
-#define KBASE_KATOM_FLAG_HOLDING_L2_REF_PROT (1U << 13)
+#define KBASE_KATOM_FLAG_HOLDING_L2_REF_PROT (1<<13)
 
 /* SW related flags about types of JS_COMMAND action
  * NOTE: These must be masked off by JS_COMMAND_MASK
@@ -104,7 +107,7 @@
 #define JS_COMMAND_SW_CAUSES_DISJOINT 0x100
 
 /* Bitmask of all SW related flags */
-#define JS_COMMAND_SW_BITS (JS_COMMAND_SW_CAUSES_DISJOINT)
+#define JS_COMMAND_SW_BITS  (JS_COMMAND_SW_CAUSES_DISJOINT)
 
 #if (JS_COMMAND_SW_BITS & JS_COMMAND_MASK)
 #error "JS_COMMAND_SW_BITS not masked off by JS_COMMAND_MASK." \
@@ -114,7 +117,8 @@
 /* Soft-stop command that causes a Disjoint event. This of course isn't
  * entirely masked off by JS_COMMAND_MASK
  */
-#define JS_COMMAND_SOFT_STOP_WITH_SW_DISJOINT (JS_COMMAND_SW_CAUSES_DISJOINT | JS_COMMAND_SOFT_STOP)
+#define JS_COMMAND_SOFT_STOP_WITH_SW_DISJOINT \
+		(JS_COMMAND_SW_CAUSES_DISJOINT | JS_COMMAND_SOFT_STOP)
 
 #define KBASEP_ATOM_ID_INVALID BASE_JD_ATOM_COUNT
 
@@ -125,33 +129,7 @@
 /* Reset the GPU after each atom completion */
 #define KBASE_SERIALIZE_RESET (1 << 2)
 
-/**
- * enum kbase_timeout_selector - The choice of which timeout to get scaled
- *                               using the lowest GPU frequency.
- * @MMU_AS_INACTIVE_WAIT_TIMEOUT: Maximum waiting time in ms for the completion
- *                                of a MMU operation
- * @JM_DEFAULT_JS_FREE_TIMEOUT: Maximum timeout to wait for JS_COMMAND_NEXT
- *                              to be updated on HW side so a Job Slot is
- *                              considered free.
- * @KBASE_PRFCNT_ACTIVE_TIMEOUT: Waiting time for prfcnt to be ready.
- * @KBASE_CLEAN_CACHE_TIMEOUT: Waiting time for cache flush to complete.
- * @KBASE_AS_INACTIVE_TIMEOUT: Waiting time for MCU address space to become inactive.
- * @KBASE_TIMEOUT_SELECTOR_COUNT: Number of timeout selectors.
- * @KBASE_DEFAULT_TIMEOUT: Fallthrough in case an invalid timeout is
- *                         passed.
- */
-enum kbase_timeout_selector {
-	MMU_AS_INACTIVE_WAIT_TIMEOUT,
-	JM_DEFAULT_JS_FREE_TIMEOUT,
-	KBASE_PRFCNT_ACTIVE_TIMEOUT,
-	KBASE_CLEAN_CACHE_TIMEOUT,
-	KBASE_AS_INACTIVE_TIMEOUT,
-	/* Must be the last in the enum */
-	KBASE_TIMEOUT_SELECTOR_COUNT,
-	KBASE_DEFAULT_TIMEOUT = JM_DEFAULT_JS_FREE_TIMEOUT
-};
-
-#if IS_ENABLED(CONFIG_DEBUG_FS)
+#ifdef CONFIG_DEBUG_FS
 /**
  * struct base_job_fault_event - keeps track of the atom which faulted or which
  *                               completed after the faulty atom but before the
@@ -171,6 +149,7 @@ enum kbase_timeout_selector {
  *                  for the faulty atom.
  */
 struct base_job_fault_event {
+
 	u32 event_code;
 	struct kbase_jd_atom *katom;
 	struct work_struct job_fault_work;
@@ -200,6 +179,8 @@ struct kbase_jd_atom_dependency {
 static inline const struct kbase_jd_atom *
 kbase_jd_katom_dep_atom(const struct kbase_jd_atom_dependency *dep)
 {
+	LOCAL_ASSERT(dep != NULL);
+
 	return (const struct kbase_jd_atom *)(dep->atom);
 }
 
@@ -210,8 +191,11 @@ kbase_jd_katom_dep_atom(const struct kbase_jd_atom_dependency *dep)
  *
  * Return: the type of dependency there is on the dependee atom.
  */
-static inline u8 kbase_jd_katom_dep_type(const struct kbase_jd_atom_dependency *dep)
+static inline u8 kbase_jd_katom_dep_type(
+		const struct kbase_jd_atom_dependency *dep)
 {
+	LOCAL_ASSERT(dep != NULL);
+
 	return dep->dep_type;
 }
 
@@ -222,10 +206,13 @@ static inline u8 kbase_jd_katom_dep_type(const struct kbase_jd_atom_dependency *
  * @a:            pointer to the dependee atom.
  * @type:         type of dependency there is on the dependee atom.
  */
-static inline void kbase_jd_katom_dep_set(const struct kbase_jd_atom_dependency *const_dep,
-					  struct kbase_jd_atom *a, u8 type)
+static inline void kbase_jd_katom_dep_set(
+		const struct kbase_jd_atom_dependency *const_dep,
+		struct kbase_jd_atom *a, u8 type)
 {
 	struct kbase_jd_atom_dependency *dep;
+
+	LOCAL_ASSERT(const_dep != NULL);
 
 	dep = (struct kbase_jd_atom_dependency *)const_dep;
 
@@ -238,9 +225,12 @@ static inline void kbase_jd_katom_dep_set(const struct kbase_jd_atom_dependency 
  *
  * @const_dep:    pointer to the dependency info structure to be setup.
  */
-static inline void kbase_jd_katom_dep_clear(const struct kbase_jd_atom_dependency *const_dep)
+static inline void kbase_jd_katom_dep_clear(
+		const struct kbase_jd_atom_dependency *const_dep)
 {
 	struct kbase_jd_atom_dependency *dep;
+
+	LOCAL_ASSERT(const_dep != NULL);
 
 	dep = (struct kbase_jd_atom_dependency *)const_dep;
 
@@ -407,21 +397,6 @@ enum kbase_atom_exit_protected_state {
  *                         sync through soft jobs and for the implicit
  *                         synchronization required on access to external
  *                         resources.
- * @dma_fence.fence_in:    Points to the dma-buf input fence for this atom.
- *                         The atom would complete only after the fence is
- *                         signaled.
- * @dma_fence.fence:       Points to the dma-buf output fence for this atom.
- * @dma_fence.fence_cb:    The object that is passed at the time of adding the
- *                         callback that gets invoked when @dma_fence.fence_in
- *                         is signaled.
- * @dma_fence.fence_cb_added: Flag to keep a track if the callback was successfully
- *                            added for @dma_fence.fence_in, which is supposed to be
- *                            invoked on the signaling of fence.
- * @dma_fence.context:     The dma-buf fence context number for this atom. A
- *                         unique context number is allocated to each katom in
- *                         the context on context creation.
- * @dma_fence.seqno:       The dma-buf fence sequence number for this atom. This
- *                         is increased every time this katom uses dma-buf fence
  * @event_code:            Event code for the job chain represented by the atom,
  *                         both HW and low-level SW events are represented by
  *                         event codes.
@@ -456,8 +431,6 @@ enum kbase_atom_exit_protected_state {
  * @blocked:               flag indicating that atom's resubmission to GPU is
  *                         blocked till the work item is scheduled to return the
  *                         atom to JS.
- * @seq_nr:                user-space sequence number, to order atoms in some
- *                         temporal order
  * @pre_dep:               Pointer to atom that this atom has same-slot
  *                         dependency on
  * @post_dep:              Pointer to atom that has same-slot dependency on
@@ -492,14 +465,11 @@ enum kbase_atom_exit_protected_state {
  *                         when transitioning into or out of protected mode.
  *                         Atom will be either entering or exiting the
  *                         protected mode.
- * @protected_state.enter: entering the protected mode.
- * @protected_state.exit:  exiting the protected mode.
  * @runnable_tree_node:    The node added to context's job slot specific rb tree
  *                         when the atom becomes runnable.
  * @age:                   Age of atom relative to other atoms in the context,
  *                         is snapshot of the age_count counter in kbase
  *                         context.
- * @jobslot: Job slot to use when BASE_JD_REQ_JOB_SLOT is specified.
  */
 struct kbase_jd_atom {
 	struct work_struct work;
@@ -524,12 +494,23 @@ struct kbase_jd_atom {
 	u32 device_nr;
 	u64 jc;
 	void *softjob_data;
-#if IS_ENABLED(CONFIG_SYNC_FILE)
+#if defined(CONFIG_SYNC)
+	struct sync_fence *fence;
+	struct sync_fence_waiter sync_waiter;
+#endif				/* CONFIG_SYNC */
+#if defined(CONFIG_MALI_BIFROST_DMA_FENCE) || defined(CONFIG_SYNC_FILE)
 	struct {
 		/* Use the functions/API defined in mali_kbase_fence.h to
 		 * when working with this sub struct
 		 */
+#if defined(CONFIG_SYNC_FILE)
+		/* Input fence */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
+		struct fence *fence_in;
+#else
 		struct dma_fence *fence_in;
+#endif
+#endif
 		/* This points to the dma-buf output fence for this atom. If
 		 * this is NULL then there is no fence for this atom and the
 		 * following fields related to dma_fence may have invalid data.
@@ -541,18 +522,50 @@ struct kbase_jd_atom {
 		 * regardless of the event_code of the katom (signal also on
 		 * failure).
 		 */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
+		struct fence *fence;
+#else
 		struct dma_fence *fence;
-
-		/* This is the callback object that is registered for the fence_in.
-		 * The callback is invoked when the fence_in is signaled.
+#endif
+		/* The dma-buf fence context number for this atom. A unique
+		 * context number is allocated to each katom in the context on
+		 * context creation.
 		 */
-		struct dma_fence_cb fence_cb;
-		bool fence_cb_added;
-
 		unsigned int context;
+		/* The dma-buf fence sequence number for this atom. This is
+		 * increased every time this katom uses dma-buf fence.
+		 */
 		atomic_t seqno;
+		/* This contains a list of all callbacks set up to wait on
+		 * other fences.  This atom must be held back from JS until all
+		 * these callbacks have been called and dep_count have reached
+		 * 0. The initial value of dep_count must be equal to the
+		 * number of callbacks on this list.
+		 *
+		 * This list is protected by jctx.lock. Callbacks are added to
+		 * this list when the atom is built and the wait are set up.
+		 * All the callbacks then stay on the list until all callbacks
+		 * have been called and the atom is queued, or cancelled, and
+		 * then all callbacks are taken off the list and freed.
+		 */
+		struct list_head callbacks;
+		/* Atomic counter of number of outstandind dma-buf fence
+		 * dependencies for this atom. When dep_count reaches 0 the
+		 * atom may be queued.
+		 *
+		 * The special value "-1" may only be set after the count
+		 * reaches 0, while holding jctx.lock. This indicates that the
+		 * atom has been handled, either queued in JS or cancelled.
+		 *
+		 * If anyone but the dma-fence worker sets this to -1 they must
+		 * ensure that any potentially queued worker must have
+		 * completed before allowing the atom to be marked as unused.
+		 * This can be done by flushing the fence work queue:
+		 * kctx->dma_fence.wq.
+		 */
+		atomic_t dep_count;
 	} dma_fence;
-#endif /* CONFIG_SYNC_FILE */
+#endif /* CONFIG_MALI_BIFROST_DMA_FENCE || CONFIG_SYNC_FILE */
 
 	/* Note: refer to kbasep_js_atom_retained_state, which will take a copy
 	 * of some of the following members
@@ -560,18 +573,22 @@ struct kbase_jd_atom {
 	enum base_jd_event_code event_code;
 	base_jd_core_req core_req;
 	u8 jobslot;
+	u8 renderpass_id;
+	struct base_jd_fragment jc_fragment;
 
 	u32 ticks;
 	int sched_priority;
 
 	wait_queue_head_t completed;
 	enum kbase_jd_atom_state status;
-#if IS_ENABLED(CONFIG_GPU_TRACEPOINTS)
+#ifdef CONFIG_GPU_TRACEPOINTS
 	int work_id;
 #endif
-	unsigned int slot_nr;
+	int slot_nr;
 
 	u32 atom_flags;
+
+	int retry_count;
 
 	enum kbase_atom_gpu_rb_state gpu_rb_state;
 
@@ -579,6 +596,7 @@ struct kbase_jd_atom {
 
 	atomic_t blocked;
 
+	/* user-space sequence number, to order atoms in some temporal order */
 	u64 seq_nr;
 
 	struct kbase_jd_atom *pre_dep;
@@ -589,7 +607,7 @@ struct kbase_jd_atom {
 
 	u32 flush_id;
 
-#if IS_ENABLED(CONFIG_DEBUG_FS)
+#ifdef CONFIG_DEBUG_FS
 	struct base_job_fault_event fault_event;
 #endif
 	struct list_head queue;
@@ -609,54 +627,10 @@ struct kbase_jd_atom {
 	u32 age;
 };
 
-static inline bool kbase_jd_katom_is_protected(const struct kbase_jd_atom *katom)
+static inline bool kbase_jd_katom_is_protected(
+		const struct kbase_jd_atom *katom)
 {
 	return (bool)(katom->atom_flags & KBASE_KATOM_FLAG_PROTECTED);
-}
-
-/**
- * kbase_jd_atom_is_younger - query if one atom is younger by age than another
- *
- * @katom_a: the first atom
- * @katom_b: the second atom
- *
- * Return: true if the first atom is strictly younger than the second,
- *         false otherwise.
- */
-static inline bool kbase_jd_atom_is_younger(const struct kbase_jd_atom *katom_a,
-					    const struct kbase_jd_atom *katom_b)
-{
-	return ((s32)(katom_a->age - katom_b->age) < 0);
-}
-
-/**
- * kbase_jd_atom_is_earlier - Check whether the first atom has been submitted
- *                            earlier than the second one
- *
- * @katom_a: the first atom
- * @katom_b: the second atom
- *
- * Return: true if the first atom has been submitted earlier than the
- * second atom. It is used to understand if an atom that is ready has been
- * submitted earlier than the currently running atom, so that the currently
- * running atom should be preempted to allow the ready atom to run.
- */
-static inline bool kbase_jd_atom_is_earlier(const struct kbase_jd_atom *katom_a,
-					    const struct kbase_jd_atom *katom_b)
-{
-	/* No seq_nr set? */
-	if (!katom_a->seq_nr || !katom_b->seq_nr)
-		return false;
-
-	/* Efficiently handle the unlikely case of wrapping.
-	 * The following code assumes that the delta between the sequence number
-	 * of the two atoms is less than INT64_MAX.
-	 * In the extremely unlikely case where the delta is higher, the comparison
-	 * defaults for no preemption.
-	 * The code also assumes that the conversion from unsigned to signed types
-	 * works because the signed integers are 2's complement.
-	 */
-	return (s64)(katom_a->seq_nr - katom_b->seq_nr) < 0;
 }
 
 /*
@@ -671,6 +645,75 @@ static inline bool kbase_jd_atom_is_earlier(const struct kbase_jd_atom *katom_a,
 #define KBASE_JD_DEP_QUEUE_SIZE 256
 
 /**
+ * enum kbase_jd_renderpass_state - State of a renderpass
+ * @KBASE_JD_RP_COMPLETE: Unused or completed renderpass. Can only transition to
+ *                        START.
+ * @KBASE_JD_RP_START:    Renderpass making a first attempt at tiling.
+ *                        Can transition to PEND_OOM or COMPLETE.
+ * @KBASE_JD_RP_PEND_OOM: Renderpass whose first attempt at tiling used too much
+ *                        memory and has a soft-stop pending. Can transition to
+ *                        OOM or COMPLETE.
+ * @KBASE_JD_RP_OOM:      Renderpass whose first attempt at tiling used too much
+ *                        memory and therefore switched to incremental
+ *                        rendering. The fragment job chain is forced to run.
+ *                        Can only transition to RETRY.
+ * @KBASE_JD_RP_RETRY:    Renderpass making a second or subsequent attempt at
+ *                        tiling. Can transition to RETRY_PEND_OOM or COMPLETE.
+ * @KBASE_JD_RP_RETRY_PEND_OOM: Renderpass whose second or subsequent attempt at
+ *                              tiling used too much memory again and has a
+ *                              soft-stop pending. Can transition to RETRY_OOM
+ *                              or COMPLETE.
+ * @KBASE_JD_RP_RETRY_OOM: Renderpass whose second or subsequent attempt at
+ *                         tiling used too much memory again. The fragment job
+ *                         chain is forced to run. Can only transition to RETRY.
+ *
+ * A state machine is used to control incremental rendering.
+ */
+enum kbase_jd_renderpass_state {
+	KBASE_JD_RP_COMPLETE,       /* COMPLETE => START */
+	KBASE_JD_RP_START,          /* START => PEND_OOM or COMPLETE */
+	KBASE_JD_RP_PEND_OOM,       /* PEND_OOM => OOM or COMPLETE */
+	KBASE_JD_RP_OOM,            /* OOM => RETRY */
+	KBASE_JD_RP_RETRY,          /* RETRY => RETRY_PEND_OOM or
+				     *          COMPLETE
+				     */
+	KBASE_JD_RP_RETRY_PEND_OOM, /* RETRY_PEND_OOM => RETRY_OOM or
+				     *                   COMPLETE
+				     */
+	KBASE_JD_RP_RETRY_OOM,      /* RETRY_OOM => RETRY */
+};
+
+/**
+ * struct kbase_jd_renderpass - Data for a renderpass
+ * @state:        Current state of the renderpass. If KBASE_JD_RP_COMPLETE then
+ *                all other members are invalid.
+ *                Both the job dispatcher context and hwaccess_lock must be
+ *                locked to modify this so that it can be read with either
+ *                (or both) locked.
+ * @start_katom:  Address of the atom that is the start of a renderpass.
+ *                Both the job dispatcher context and hwaccess_lock must be
+ *                locked to modify this so that it can be read with either
+ *                (or both) locked.
+ * @end_katom:    Address of the atom that is the end of a renderpass, or NULL
+ *                if that atom hasn't been added to the job scheduler yet.
+ *                The job dispatcher context and hwaccess_lock must be
+ *                locked to modify this so that it can be read with either
+ *                (or both) locked.
+ * @oom_reg_list: A list of region structures which triggered out-of-memory.
+ *                The hwaccess_lock must be locked to access this.
+ *
+ * Atoms tagged with BASE_JD_REQ_START_RENDERPASS or BASE_JD_REQ_END_RENDERPASS
+ * are associated with an object of this type, which is created and maintained
+ * by kbase to keep track of each renderpass.
+ */
+struct kbase_jd_renderpass {
+	enum kbase_jd_renderpass_state state;
+	struct kbase_jd_atom *start_katom;
+	struct kbase_jd_atom *end_katom;
+	struct list_head oom_reg_list;
+};
+
+/**
  * struct kbase_jd_context  - per context object encapsulating all the
  *                            Job dispatcher related state.
  * @lock:                     lock to serialize the updates made to the
@@ -680,6 +723,9 @@ static inline bool kbase_jd_atom_is_earlier(const struct kbase_jd_atom *katom_a,
  * @atoms:                    Array of the objects representing atoms,
  *                            containing the complete state and attributes
  *                            of an atom.
+ * @renderpasses:             Array of renderpass state for incremental
+ *                            rendering, indexed by user-specified renderpass
+ *                            ID.
  * @job_nr:                   Tracks the number of atoms being processed by the
  *                            kbase. This includes atoms that are not tracked by
  *                            scheduler: 'not ready to run' & 'dependency-only'
@@ -707,7 +753,7 @@ static inline bool kbase_jd_atom_is_earlier(const struct kbase_jd_atom *katom_a,
  *                            atom completes
  *                            execution on GPU or the input fence get signaled.
  * @tb_lock:                  Lock to serialize the write access made to @tb to
- *                            store the register access trace messages.
+ *                            to store the register access trace messages.
  * @tb:                       Pointer to the Userspace accessible buffer storing
  *                            the trace messages for register read/write
  *                            accesses made by the Kbase. The buffer is filled
@@ -723,12 +769,12 @@ static inline bool kbase_jd_atom_is_earlier(const struct kbase_jd_atom *katom_a,
  * @jit_pending_alloc:        A list of just-in-time memory allocation
  *                            soft-jobs which will be reattempted after the
  *                            impending free of other active allocations.
- * @max_priority:             Max priority level allowed for this context.
  */
 struct kbase_jd_context {
 	struct mutex lock;
 	struct kbasep_js_kctx_info sched_info;
 	struct kbase_jd_atom atoms[BASE_JD_ATOM_COUNT];
+	struct kbase_jd_renderpass renderpasses[BASE_JD_RP_COUNT];
 	struct workqueue_struct *job_done_wq;
 
 	wait_queue_head_t zero_jobs_wait;
@@ -737,13 +783,12 @@ struct kbase_jd_context {
 	u32 job_nr;
 	size_t tb_wrap_offset;
 
-#if IS_ENABLED(CONFIG_GPU_TRACEPOINTS)
+#ifdef CONFIG_GPU_TRACEPOINTS
 	atomic_t work_id;
 #endif
 
 	struct list_head jit_atoms_head;
 	struct list_head jit_pending_alloc;
-	int max_priority;
 };
 
 /**
@@ -775,7 +820,7 @@ struct jsctx_queue {
  * @current_setup:     Stores the MMU configuration for this address space.
  */
 struct kbase_as {
-	unsigned int number;
+	int number;
 	struct workqueue_struct *pf_wq;
 	struct work_struct work_pagefault;
 	struct work_struct work_busfault;

@@ -13,4 +13,5 @@
 #
 
 bifrost_kbase-y += \
-	platform/$(MALI_PLATFORM_DIR)/mali_kbase_config_rk.o
+	$(MALI_PLATFORM_DIR)/mali_kbase_config_rk.o \
+

@@ -1,12 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2019-2024 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2020 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -17,51 +16,51 @@
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
  *
+ * SPDX-License-Identifier: GPL-2.0
+ *
  */
 
-#include <tl/mali_kbase_tracepoints.h>
-#include <tl/mali_kbase_timeline.h>
-#include <tl/mali_kbase_timeline_priv.h>
+#include "../mali_kbase_tracepoints.h"
+#include "../mali_kbase_timeline.h"
+#include "../mali_kbase_timeline_priv.h"
 
 #include <mali_kbase.h>
 
 void kbase_create_timeline_objects(struct kbase_device *kbdev)
 {
-	int as_nr;
+	unsigned int as_nr;
 	unsigned int slot_i;
 	struct kbase_context *kctx;
 	struct kbase_timeline *timeline = kbdev->timeline;
-	struct kbase_tlstream *summary = &kbdev->timeline->streams[TL_STREAM_TYPE_OBJ_SUMMARY];
-	u32 const num_sb_entries = kbdev->gpu_props.gpu_id.arch_major >= 11 ? 16 : 8;
-	u32 const supports_gpu_sleep =
-#ifdef KBASE_PM_RUNTIME
-		test_bit(KBASE_GPU_SUPPORTS_GPU_SLEEP, &kbdev->pm.backend.gpu_sleep_allowed);
-#else
-		false;
-#endif /* KBASE_PM_RUNTIME */
+	struct kbase_tlstream *summary =
+		&kbdev->timeline->streams[TL_STREAM_TYPE_OBJ_SUMMARY];
 
 	/* Summarize the Address Space objects. */
 	for (as_nr = 0; as_nr < kbdev->nr_hw_address_spaces; as_nr++)
-		__kbase_tlstream_tl_new_as(summary, &kbdev->as[as_nr], (u32)as_nr);
+		__kbase_tlstream_tl_new_as(summary, &kbdev->as[as_nr], as_nr);
 
 	/* Create Legacy GPU object to track in AOM for dumping */
-	__kbase_tlstream_tl_new_gpu(summary, kbdev, kbdev->id, kbdev->gpu_props.num_cores);
+	__kbase_tlstream_tl_new_gpu(summary,
+			kbdev,
+			kbdev->gpu_props.props.raw_props.gpu_id,
+			kbdev->gpu_props.num_cores);
+
 
 	for (as_nr = 0; as_nr < kbdev->nr_hw_address_spaces; as_nr++)
-		__kbase_tlstream_tl_lifelink_as_gpu(summary, &kbdev->as[as_nr], kbdev);
+		__kbase_tlstream_tl_lifelink_as_gpu(summary,
+				&kbdev->as[as_nr],
+				kbdev);
 
 	/* Trace the creation of a new kbase device and set its properties. */
-	__kbase_tlstream_tl_kbase_new_device(
-		summary, kbdev->id, kbdev->gpu_props.num_cores, kbdev->csf.global_iface.group_num,
-		(u32)kbdev->nr_hw_address_spaces, num_sb_entries,
-		kbdev->gpu_props.gpu_features.cross_stream_sync, supports_gpu_sleep,
-		0
-	);
+	__kbase_tlstream_tl_kbase_new_device(summary,
+		kbdev->gpu_props.props.raw_props.gpu_id,
+		kbdev->gpu_props.num_cores, kbdev->csf.global_iface.group_num,
+		kbdev->nr_hw_address_spaces);
 
 	/* Lock the context list, to ensure no changes to the list are made
 	 * while we're summarizing the contexts and their contents.
 	 */
-	mutex_lock(&timeline->tl_kctx_list_lock);
+	mutex_lock(&kbdev->kctx_list_lock);
 
 	/* Hold the scheduler lock while we emit the current state
 	 * We also need to continue holding the lock until after the first body
@@ -71,12 +70,14 @@ void kbase_create_timeline_objects(struct kbase_device *kbdev)
 	mutex_lock(&kbdev->csf.scheduler.lock);
 
 	for (slot_i = 0; slot_i < kbdev->csf.global_iface.group_num; slot_i++) {
+
 		struct kbase_queue_group *group =
 			kbdev->csf.scheduler.csg_slots[slot_i].resident_group;
 
 		if (group)
-			__kbase_tlstream_tl_kbase_device_program_csg(
-				summary, kbdev->id, group->kctx->id, group->handle, slot_i, 0);
+			__kbase_tlstream_tl_kbase_device_program_csg(summary,
+				kbdev->gpu_props.props.raw_props.gpu_id,
+				group->handle, slot_i);
 	}
 
 	/* Reset body stream buffers while holding the kctx lock.
@@ -89,9 +90,10 @@ void kbase_create_timeline_objects(struct kbase_device *kbdev)
 	mutex_unlock(&kbdev->csf.scheduler.lock);
 
 	/* For each context in the device... */
-	list_for_each_entry(kctx, &timeline->tl_kctx_list, tl_kctx_list_node) {
+	list_for_each_entry(kctx, &kbdev->kctx_list, kctx_list_link) {
 		size_t i;
-		struct kbase_tlstream *body = &timeline->streams[TL_STREAM_TYPE_OBJ];
+		struct kbase_tlstream *body =
+			&timeline->streams[TL_STREAM_TYPE_OBJ];
 
 		/* Lock the context's KCPU queues, to ensure no KCPU-queue
 		 * related actions can occur in this context from now on.
@@ -115,14 +117,20 @@ void kbase_create_timeline_objects(struct kbase_device *kbdev)
 		 * hasn't been traced yet. They may, however, cause benign
 		 * errors to be emitted.
 		 */
-		__kbase_tlstream_tl_kbase_new_ctx(body, kctx->id, kbdev->id);
+		__kbase_tlstream_tl_kbase_new_ctx(body, kctx->id,
+				kbdev->gpu_props.props.raw_props.gpu_id);
 
 		/* Also trace with the legacy AOM tracepoint for dumping */
-		__kbase_tlstream_tl_new_ctx(body, kctx, kctx->id, (u32)(kctx->tgid));
+		__kbase_tlstream_tl_new_ctx(body,
+				kctx,
+				kctx->id,
+				(u32)(kctx->tgid));
 
 		/* Trace the currently assigned address space */
 		if (kctx->as_nr != KBASEP_AS_NR_INVALID)
-			__kbase_tlstream_tl_kbase_ctx_assign_as(body, kctx->id, (u32)kctx->as_nr);
+			__kbase_tlstream_tl_kbase_ctx_assign_as(body, kctx->id,
+				kctx->as_nr);
+
 
 		/* Trace all KCPU queues in the context into the body stream.
 		 * As we acquired the KCPU lock after resetting the body stream,
@@ -138,7 +146,7 @@ void kbase_create_timeline_objects(struct kbase_device *kbdev)
 
 			if (kcpu_queue)
 				__kbase_tlstream_tl_kbase_new_kcpuqueue(
-					body, kcpu_queue, kcpu_queue->id, kcpu_queue->kctx->id,
+					body, kcpu_queue, kcpu_queue->kctx->id,
 					kcpu_queue->num_pending_cmds);
 		}
 
@@ -152,9 +160,9 @@ void kbase_create_timeline_objects(struct kbase_device *kbdev)
 		 * this iteration of the loop, so will start to correctly update
 		 * the object model state.
 		 */
-	}
+	};
 
-	mutex_unlock(&timeline->tl_kctx_list_lock);
+	mutex_unlock(&kbdev->kctx_list_lock);
 
 	/* Static object are placed into summary packet that needs to be
 	 * transmitted first. Flush all streams to make it available to

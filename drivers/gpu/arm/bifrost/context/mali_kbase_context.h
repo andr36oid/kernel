@@ -1,12 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2011-2024 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
  * Foundation, and any use by you of this program is subject to the terms
- * of such GNU license.
+ * of such GNU licence.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -16,6 +15,18 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, you can access it online at
  * http://www.gnu.org/licenses/gpl-2.0.html.
+ *
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ *//* SPDX-License-Identifier: GPL-2.0 */
+/*
+ *
+ * (C) COPYRIGHT 2011-2017, 2019 ARM Limited. All rights reserved.
+ *
+ * This program is free software and is provided to you under the terms of the
+ * GNU General Public License version 2 as published by the Free Software
+ * Foundation, and any use by you of this program is subject to the terms
+ * of such GNU licence.
  *
  */
 
@@ -58,7 +69,6 @@ void kbase_context_debugfs_term(struct kbase_context *const kctx);
  *               a single integer by the KBASE_API_VERSION macro.
  * @filp:        Pointer to the struct file corresponding to device file
  *               /dev/malixx instance, passed to the file's open method.
- *               Shall be passed as NULL for internally created contexts.
  *
  * Up to one context can be created for each client that opens the device file
  * /dev/malixx. Context creation is deferred until a special ioctl() system call
@@ -66,9 +76,11 @@ void kbase_context_debugfs_term(struct kbase_context *const kctx);
  *
  * Return: new kbase context or NULL on failure
  */
-struct kbase_context *kbase_create_context(struct kbase_device *kbdev, bool is_compat,
-					   base_context_create_flags const flags,
-					   unsigned long api_version, struct file *filp);
+struct kbase_context *
+kbase_create_context(struct kbase_device *kbdev, bool is_compat,
+	base_context_create_flags const flags,
+	unsigned long api_version,
+	struct file *filp);
 
 /**
  * kbase_destroy_context - Destroy a kernel base context.
@@ -85,19 +97,11 @@ void kbase_destroy_context(struct kbase_context *kctx);
  *
  * Return: true if @flag is set on @kctx, false if not.
  */
-static inline bool kbase_ctx_flag(struct kbase_context *kctx, enum kbase_context_flags flag)
+static inline bool kbase_ctx_flag(struct kbase_context *kctx,
+				      enum kbase_context_flags flag)
 {
-	return atomic_read(&kctx->flags) & (int)flag;
+	return atomic_read(&kctx->flags) & flag;
 }
-
-/**
- * kbase_ctx_compat_mode - Indicate whether a kbase context needs to operate
- *                         in compatibility mode for 32-bit userspace.
- * @kctx: kbase context
- *
- * Return: True if needs to maintain compatibility, False otherwise.
- */
-bool kbase_ctx_compat_mode(struct kbase_context *kctx);
 
 /**
  * kbase_ctx_flag_clear - Clear @flag on @kctx
@@ -110,9 +114,28 @@ bool kbase_ctx_compat_mode(struct kbase_context *kctx);
  * Some flags have locking requirements, check the documentation for the
  * respective flags.
  */
-static inline void kbase_ctx_flag_clear(struct kbase_context *kctx, enum kbase_context_flags flag)
+static inline void kbase_ctx_flag_clear(struct kbase_context *kctx,
+					enum kbase_context_flags flag)
 {
+#if KERNEL_VERSION(4, 3, 0) > LINUX_VERSION_CODE
+	/*
+	 * Earlier kernel versions doesn't have atomic_andnot() or
+	 * atomic_and(). atomic_clear_mask() was only available on some
+	 * architectures and removed on arm in v3.13 on arm and arm64.
+	 *
+	 * Use a compare-exchange loop to clear the flag on pre 4.3 kernels,
+	 * when atomic_andnot() becomes available.
+	 */
+	int old, new;
+
+	do {
+		old = atomic_read(&kctx->flags);
+		new = old & ~flag;
+
+	} while (atomic_cmpxchg(&kctx->flags, old, new) != old);
+#else
 	atomic_andnot(flag, &kctx->flags);
+#endif
 }
 
 /**
@@ -126,7 +149,8 @@ static inline void kbase_ctx_flag_clear(struct kbase_context *kctx, enum kbase_c
  * Some flags have locking requirements, check the documentation for the
  * respective flags.
  */
-static inline void kbase_ctx_flag_set(struct kbase_context *kctx, enum kbase_context_flags flag)
+static inline void kbase_ctx_flag_set(struct kbase_context *kctx,
+				      enum kbase_context_flags flag)
 {
 	atomic_or(flag, &kctx->flags);
 }
