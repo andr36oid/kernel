@@ -1740,6 +1740,8 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		/* WWAN devices should always be named "wwan%d" */
 		if ((dev->driver_info->flags & FLAG_WWAN) != 0)
 			strscpy(net->name, "wwan%d", sizeof(net->name));
+		if (dev->driver_info->flags & FLAG_LTE)
+			strscpy(net->name, "lte%d", sizeof(net->name));
 
 		/* devices that cannot do ARP */
 		if ((dev->driver_info->flags & FLAG_NOARP) != 0)
