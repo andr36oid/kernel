@@ -77,6 +77,7 @@ jobs:
           8188fu   kelebek333/rtl8188fu               799fa0beacadce84bef6514d5948b454a8037c96
           8723bu   lwfinger/rtl8723bu                 af3a408d6399655b0db23c2c8720436ca725ca47
           8192eu   Mange/rtl8192eu-linux-driver       c629cc972a0d878c930d19c4a9309c27c1e61f92   CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM_AARCH64=y CROSS_COMPILE=aarch64-linux-gnu-
+          8733bu   ROCKNIX/RTL8733BU                  308919f005f439de433aac977f925bb57f59acf4
           LIST
 
       - name: Install modules
