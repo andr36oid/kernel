@@ -65,7 +65,7 @@ jobs:
                 sed -i 's/^EXTRA_CFLAGS += -DCONFIG_CONCURRENT_MODE/#&/' $EXT/$name/Makefile
                 sed -i '/^#if 0$/{N;/building for Android/s/^#if 0/#if 1/}' $EXT/$name/os_dep/usb_intf.c
                 ;;
-              8192eu)
+              8192eu|8733bu)
                 sed -i '/^MODULE_LICENSE("GPL");$/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' $EXT/$name/os_dep/linux/os_intfs.c
                 ;;
             esac
