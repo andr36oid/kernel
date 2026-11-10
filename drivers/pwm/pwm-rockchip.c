@@ -7,18 +7,21 @@
  */
 
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/debugfs.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/irq.h>
 #include <linux/module.h>
+#include <linux/mfd/syscon.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 #include <linux/pwm-rockchip.h>
+#include <linux/regmap.h>
 #include <linux/time.h>
 #include <media/rc-core.h>
 #include "pwm-rockchip-irq-callbacks.h"
@@ -477,6 +480,73 @@ static void rockchip_pwm_get_state(struct pwm_chip *chip,
 	if (!pc->oneshot_en)
 		clk_disable(pc->pclk);
 }
+
+#ifdef CONFIG_DEBUG_FS
+/* Diagnostic readback, unlike /sys/kernel/debug/pwm's cached request. The APB
+ * clock is held only for register reads; no waveform or mux is programmed. */
+static ssize_t hardware_state_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct rockchip_pwm_chip *pc = dev_get_drvdata(dev);
+	struct pwm_state state = { 0 };
+	struct device_node *pins;
+	struct regmap *pmugrf;
+	u32 period, duty, ctrl, mux;
+	ssize_t size;
+	int ret;
+
+	if (!device_trylock(dev))
+		return scnprintf(buf, PAGE_SIZE, "busy\n");
+	if (!dev->driver || !pc || !pc->data) {
+		size = -ENODEV;
+		goto unlock;
+	}
+	if (pc->pclk == pc->clk || pc->main_version >= 4) {
+		size = scnprintf(buf, PAGE_SIZE,
+			"unsupported: readback is limited to legacy PWM with a separate APB clock\n");
+		goto unlock;
+	}
+	ret = clk_enable(pc->pclk);
+	if (ret) {
+		size = ret;
+		goto unlock;
+	}
+	period = readl_relaxed(pc->base + pc->data->regs->period);
+	duty = readl_relaxed(pc->base + pc->data->regs->duty);
+	ctrl = readl_relaxed(pc->base + pc->data->regs->ctrl);
+	rockchip_pwm_get_state(&pc->chip, &pc->chip.pwms[0], &state);
+	size = scnprintf(buf, PAGE_SIZE,
+		"period_count=%u duty_count=%u ctrl=0x%08x enabled=%u period_ns=%llu duty_ns=%llu polarity=%u cached_clock_hz=%lu current_clock_hz=%lu counter_clock_enabled=%u\n",
+		period, duty, ctrl, state.enabled,
+		(unsigned long long)state.period,
+		(unsigned long long)state.duty_cycle, state.polarity,
+		pc->clk_rate, clk_get_rate(pc->clk), __clk_is_enabled(pc->clk));
+	clk_disable(pc->pclk);
+	/* PX30/RK3326 PWM1 routes to GPIO0_C0. Bank0 uses 2-bit PMUGRF
+	 * IOMUX fields, offset0x08 for GPIO0_C; function1 is PWM1. */
+	if (pc->channel_id == 1 &&
+	    of_device_is_compatible(dev->of_node, "rockchip,px30-pwm")) {
+		pins = of_find_compatible_node(NULL, NULL, "rockchip,px30-pinctrl");
+		if (pins) {
+			pmugrf = syscon_regmap_lookup_by_phandle(pins, "rockchip,pmu");
+			if (!IS_ERR(pmugrf) && !regmap_read(pmugrf, 0x08, &mux))
+				size += scnprintf(buf + size, PAGE_SIZE - size,
+					"pmugrf_gpio0c_iomux=0x%08x gpio0_c0_mux=%u expected_pwm1_mux=1\n",
+					mux, mux & 3);
+			of_node_put(pins);
+		}
+	}
+unlock:
+	device_unlock(dev);
+	return size;
+}
+static DEVICE_ATTR_RO(hardware_state);
+static struct attribute *rockchip_pwm_diagnostic_attrs[] = {
+	&dev_attr_hardware_state.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(rockchip_pwm_diagnostic);
+#endif
 
 static irqreturn_t rockchip_pwm_irq_v1(int irq, void *data)
 {
@@ -2626,6 +2696,10 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
 #endif
 
 	rockchip_pwm_debugfs_init(pc);
+#ifdef CONFIG_DEBUG_FS
+	if (devm_device_add_groups(&pdev->dev, rockchip_pwm_diagnostic_groups))
+		dev_warn(&pdev->dev, "Failed to add read-only PWM hardware state\n");
+#endif
 
 	/* Keep the PWM clk enabled if the PWM appears to be up and running. */
 	if (!enabled)

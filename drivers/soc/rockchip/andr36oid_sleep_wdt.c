@@ -36,6 +36,7 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/suspend.h>
@@ -235,6 +236,29 @@ static bool awake_watch = true;
 module_param(awake_watch, bool, 0644);
 MODULE_PARM_DESC(awake_watch, "Reset with a dump if timers stop firing while awake");
 static u64 awake_kick_ns;
+
+/* Read-only status: this does not arm, feed or disable the WDT. */
+static int sleep_wdt_status_get(char *buf, const struct kernel_param *kp)
+{
+	u64 kick = READ_ONCE(awake_kick_ns);
+	u64 now = local_clock();
+	u64 age_ms = kick && now >= kick ? div_u64(now - kick, 1000000) : 0;
+	unsigned long rate = READ_ONCE(sw.rate);
+	bool ready = READ_ONCE(sw_ready);
+
+	return scnprintf(buf, PAGE_SIZE,
+		"ready=%u armed=%u awake_watch=%u shutdown=%u rate_hz=%lu top=%u nominal_timeout_s=%u last_awake_kick_age_ms=%llu irq=%d\n",
+		ready, READ_ONCE(sw.armed), READ_ONCE(awake_watch),
+		READ_ONCE(sw_shutdown), rate, READ_ONCE(sw.top),
+		rate ? top_seconds(READ_ONCE(sw.top)) : 0,
+		(unsigned long long)age_ms, READ_ONCE(sw.irq));
+}
+
+static const struct kernel_param_ops sleep_wdt_status_ops = {
+	.get = sleep_wdt_status_get,
+};
+module_param_cb(status, &sleep_wdt_status_ops, NULL, 0444);
+MODULE_PARM_DESC(status, "Read-only watchdog configuration and last awake-feed age");
 
 static void awake_kick_fn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(awake_kick_work, awake_kick_fn);
