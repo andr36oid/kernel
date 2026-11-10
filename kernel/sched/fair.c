@@ -5729,6 +5729,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	 * Let's add the task's estimated utilization to the cfs_rq's
 	 * estimated utilization, before we update schedutil.
 	 */
+	schedtune_enqueue_task(p, cpu_of(rq));
 	util_est_enqueue(&rq->cfs, p);
 
 	/*
@@ -5836,6 +5837,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
 
+	schedtune_dequeue_task(p, cpu_of(rq));
 	util_est_dequeue(&rq->cfs, p);
 
 	for_each_sched_entity(se) {
@@ -6895,8 +6897,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	if (!task_util_est(p) && p_util_min == 0)
 		goto unlock;
 
-	latency_sensitive = uclamp_latency_sensitive(p);
-	boosted = uclamp_boosted(p);
+	latency_sensitive = uclamp_latency_sensitive(p) || schedtune_prefer_idle(p);
+	boosted = uclamp_boosted(p) || schedtune_task_boost(p) > 0;
 	target_cap = boosted ? 0 : ULONG_MAX;
 
 	for (; pd; pd = pd->next) {

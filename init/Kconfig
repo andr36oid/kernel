@@ -1009,6 +1009,14 @@ config RT_GROUP_SCHED
 
 endif #CGROUP_SCHED
 
+config SCHED_TUNE
+	bool "Android schedtune boost compatibility"
+	depends on SMP && CGROUPS
+	help
+	  Restore the Android schedtune cgroup boost and prefer_idle interface.
+	  Its runnable-task utilization margin feeds schedutil before uclamp,
+	  so existing utilization caps still apply. This retains UCLAMP_TASK.
+
 config UCLAMP_TASK_GROUP
 	bool "Utilization clamping per group of tasks"
 	depends on CGROUP_SCHED

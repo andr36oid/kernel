@@ -3473,6 +3473,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	trace_android_rvh_sched_fork(p);
 
 	__sched_fork(clone_flags, p);
+#ifdef CONFIG_SCHED_TUNE
+	p->schedtune_group = 0;
+	p->schedtune_accounted = false;
+#endif
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external

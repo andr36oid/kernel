@@ -76,6 +76,7 @@
 # include <asm/paravirt.h>
 #endif
 
+#include "tune.h"
 #include "cpupri.h"
 #include "cpudeadline.h"
 

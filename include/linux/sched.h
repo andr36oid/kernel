@@ -704,6 +704,11 @@ struct task_struct {
 	unsigned int			rt_priority;
 
 	const struct sched_class	*sched_class;
+#ifdef CONFIG_SCHED_TUNE
+	/* Protected by task rq lock; survives cgroup_exit until final dequeue. */
+	unsigned int			schedtune_group;
+	bool				schedtune_accounted;
+#endif
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 #ifdef CONFIG_CGROUP_SCHED
