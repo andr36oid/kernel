@@ -19,26 +19,20 @@
 		};
 	};
 
-	left-stick {
-		compatible = "adc-joystick";
-		label = "GRC802 left stick";
-		io-channels = <&saradc 0>, <&saradc 1>;
-		io-channel-names = "joy_x", "joy_y";
+	grc802_joystick: grc802-joystick {
+		compatible = "play_joystick";
+		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>, <&saradc 3>;
+		io-channel-names = "joy_x", "joy_y", "joy_rx", "joy_ry";
 		poll-interval = <30>;
-	};
-
-	right-stick {
-		compatible = "adc-joystick";
-		label = "GRC802 right stick";
-		io-channels = <&saradc 2>, <&saradc 3>;
-		io-channel-names = "joy_x", "joy_y";
-		linux,abs-codes = <ABS_RX ABS_RY>;
-		poll-interval = <30>;
+		report-x-min = <0>; report-x-max = <1800>;
+		report-y-min = <0>; report-y-max = <1800>;
+		report-rx-min = <0>; report-rx-max = <1800>;
+		report-ry-min = <0>; report-ry-max = <1800>;
 	};
 
 	gamepad-keys {
 		compatible = "gpio-keys";
-		label = "GO-Super Gamepad";
+		label = "GRC802 Gamepad";
 		pinctrl-names = "default";
 		pinctrl-0 = <&grc802_button_pins>;
 		r1 {
@@ -250,7 +244,28 @@
 	};
 };
 
-&backlight { pwms = <&pwm1 0 25000 0>; default-brightness-level = <200>; };
+&backlight {
+    pwms = <&pwm1 0 25000 0>;
+    brightness-levels = <
+        0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+        16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+        32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47
+        48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+        64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79
+        80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
+        96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111
+        112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127
+        128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143
+        144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159
+        160 161 162 163 164 165 166 167 168 169 170 171 172 173 174 175
+        176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191
+        192 193 194 195 196 197 198 199 200 201 202 203 204 205 206 207
+        208 209 210 211 212 213 214 215 216 217 218 219 220 221 222 223
+        224 225 226 227 228 229 230 231 232 233 234 235 236 237 238 239
+        240 241 242 243 244 245 246 247 248 249 250 251 252 253 254 255
+    >;
+    default-brightness-level = <200>;
+};
 &status_led { status = "disabled"; };
 &pwm0 { status = "disabled"; };
 
@@ -384,18 +399,18 @@
 &pmic_int { rockchip,pins = <0 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>; };
 &vccsys { regulator-name = "vcc5v0_sys"; regulator-boot-on; regulator-min-microvolt = <5000000>; regulator-max-microvolt = <5000000>; };
 
+/* DCDC_REG4 feeds vccio4/5: stock is 3.0 V, not the base label's 3.3 V. */
 &vcc_3v3 {
-					regulator-always-on;
-					regulator-boot-on;
-					regulator-min-microvolt = <0xf4240>;
-					regulator-max-microvolt = <0xf4240>;
-					regulator-name = "vcc_1v0";
-
-					regulator-state-mem {
-						regulator-on-in-suspend;
-						regulator-suspend-microvolt = <0xf4240>;
-					};
-				};
+    regulator-name = "vcc_3v0";
+    regulator-always-on;
+    regulator-boot-on;
+    regulator-min-microvolt = <3000000>;
+    regulator-max-microvolt = <3000000>;
+    regulator-state-mem {
+        regulator-on-in-suspend;
+        regulator-suspend-microvolt = <3000000>;
+    };
+};
 
 &vcc_1v0 {
 					regulator-always-on;
@@ -495,14 +510,8 @@
 	/delete-property/ vccio6-supply;
 };
 
-/* Phase 2: stock radio wiring. This does not establish working Wi-Fi or BT. */
+/* Stock SV6160/RK915 wiring; reuse the existing vendor RK915 driver. */
 / {
-	grc802_sdio_pwrseq: sdio-pwrseq {
-		compatible = "mmc-pwrseq-simple";
-		/* Stock WIFI,poweren_gpio is active high on GPIO0_A2. */
-		reset-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
-		post-power-on-delay-ms = <200>;
-	};
 
 	wireless-bluetooth {
 		compatible = "bluetooth-platdata";
@@ -533,8 +542,8 @@
 	wifi_chip_type = "rk915";
 	WIFI,poweren_gpio = <&gpio0 RK_PA2 GPIO_ACTIVE_HIGH>;
 	WIFI,host_wake_irq = <&gpio0 RK_PA1 GPIO_ACTIVE_HIGH>;
-	/* mmc-pwrseq owns power; do not let rfkill-rk request the same GPIO. */
-	status = "disabled";
+	/* Vendor rfkill power glue is the sole owner of GPIO0_A2. */
+	status = "okay";
 };
 
 &sdio {
@@ -542,6 +551,10 @@
 	/delete-property/ cd-gpios;
 	/delete-property/ supports-sd;
 	/delete-property/ cap-mmc-highspeed;
+	/delete-property/ sd-uhs-sdr12;
+	/delete-property/ sd-uhs-sdr25;
+	/delete-property/ sd-uhs-sdr50;
+	/delete-property/ sd-uhs-sdr104;
 	/delete-property/ card-detect-delay;
 	/delete-property/ vmmc-supply;
 	/delete-property/ vqmmc-supply;
@@ -552,22 +565,13 @@
 	cap-sd-highspeed;
 	cap-sdio-irq;
 	supports-sdio;
-	supports-rk912;
+	supports-rk915;
 	keep-power-in-suspend;
 	non-removable;
-	mmc-pwrseq = <&grc802_sdio_pwrseq>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk>;
 	status = "okay";
 
-	wifi@1 {
-		compatible = "seekwave,sv6160";
-		reg = <1>;
-		interrupt-parent = <&gpio0>;
-		/* Use the enabled stock WLAN binding, not the XF40H overlay's A5. */
-		interrupts = <RK_PA1 IRQ_TYPE_LEVEL_HIGH>;
-		interrupt-names = "host-wake";
-	};
 };
 
 /* Stock enables UART1 with CTS, leaving RTS to bluetooth-platdata. */
