@@ -39,6 +39,14 @@ properties:
       Delay in ms between disabling the backlight using GPIO and setting PWM
       value to 0.
 
+  andr36oid,wait-for-panel:
+    type: boolean
+    description: |
+      Start with the backlight powered down even if firmware left its PWM
+      enabled. A panel consumer must subsequently enable this backlight using
+      the backlight API. Used when rebuilding the GR36 display pipeline from
+      a firmware mode that cannot be taken over by the kernel.
+
   brightness-levels:
     description:
       Array of distinct brightness levels. Typically these are in the range

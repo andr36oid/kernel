@@ -89,7 +89,9 @@ static void pwm_backlight_power_off(struct pwm_bl_data *pb)
 	state.duty_cycle = 0;
 	pwm_apply_state(pb->pwm, &state);
 
-	regulator_disable(pb->power_supply);
+	/* A bootloader-enabled PWM does not give us a regulator use count. */
+	if (pb->enabled)
+		regulator_disable(pb->power_supply);
 	pb->enabled = false;
 }
 
@@ -436,6 +438,15 @@ static int pwm_backlight_initial_power_state(const struct pwm_bl_data *pb)
 {
 	struct device_node *node = pb->dev->of_node;
 	bool active = true;
+
+	/* Boards opting in hand control to drm_panel's backlight helpers.
+	 * In particular, do not light a bootloader-initialized but unscanned
+	 * panel while the kernel is rebuilding its display pipeline.
+	 */
+	if (node && of_property_read_bool(node, "andr36oid,wait-for-panel")) {
+		dev_info(pb->dev, "andr36oid: backlight held off until panel enable\n");
+		return FB_BLANK_POWERDOWN;
+	}
 
 	/*
 	 * If the enable GPIO is present, observable (either as input

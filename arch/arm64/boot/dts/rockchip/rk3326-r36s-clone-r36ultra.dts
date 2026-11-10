@@ -270,5 +270,10 @@
 	rockchip,force-spk-hp;
 };
 
-/* Display nodes are available, but their drivers are manual-load modules. */
+/* Keep inherited backlight dark until the built-in DRM panel is enabled. */
+&backlight {
+	andr36oid,wait-for-panel;
+};
+
+/* USB OTG starts in peripheral mode. */
 #include "andr36oid-gr36-display-modules.dtsi"
