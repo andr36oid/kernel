@@ -55,6 +55,7 @@ struct rk_i2s_dev {
 	struct snd_dmaengine_dai_dma_data playback_dma_data;
 
 	struct regmap *regmap;
+	void __iomem *snapshot_regs;
 	struct regmap *grf;
 
 	struct snd_pcm_substream *substreams[SNDRV_PCM_STREAM_LAST + 1];
@@ -1144,6 +1145,45 @@ static int rockchip_i2s_register_platform(struct device *dev)
 	return ret;
 }
 
+/* A bounded, read-only control-register snapshot. No FIFO data, IRQ status,
+ * resets, clock changes or PM resume. Read the actual MMIO, not regcache.
+ */
+static ssize_t andr36oid_i2s_state_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct rk_i2s_dev *i2s = dev_get_drvdata(dev);
+	static const unsigned int offsets[] = { I2S_TXCR, I2S_RXCR,
+		I2S_CKR, I2S_DMACR, I2S_XFER };
+	unsigned int values[ARRAY_SIZE(offsets)];
+	unsigned long flags, mclk;
+	int active, i, len;
+
+	active = pm_runtime_get_if_in_use(dev);
+	if (active <= 0)
+		return scnprintf(buf, PAGE_SIZE, "inactive pm_result=%d\n", active);
+	mclk = clk_get_rate(i2s->mclk);
+	spin_lock_irqsave(&i2s->lock, flags);
+	for (i = 0; i < ARRAY_SIZE(offsets); i++)
+		values[i] = readl(i2s->snapshot_regs + offsets[i]);
+	spin_unlock_irqrestore(&i2s->lock, flags);
+	len = scnprintf(buf, PAGE_SIZE,
+		"I2S_DIRECT_CONTROL mclk=%lu bclk_ratio=%u software_master=%u tx=%u rx=%u\n",
+		mclk, i2s->bclk_ratio, i2s->is_master_mode,
+		READ_ONCE(i2s->tx_start), READ_ONCE(i2s->rx_start));
+	for (i = 0; i < ARRAY_SIZE(offsets); i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%02x: %08x\n",
+				 offsets[i], values[i]);
+	pm_runtime_put(dev);
+	return len;
+}
+static DEVICE_ATTR_RO(andr36oid_i2s_state);
+static struct attribute *andr36oid_i2s_attrs[] = {
+	&dev_attr_andr36oid_i2s_state.attr, NULL,
+};
+static const struct attribute_group andr36oid_i2s_group = {
+	.attrs = andr36oid_i2s_attrs,
+};
+
 static int rockchip_i2s_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
@@ -1189,6 +1229,7 @@ static int rockchip_i2s_probe(struct platform_device *pdev)
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
+	i2s->snapshot_regs = regs;
 	i2s->regmap = devm_regmap_init_mmio(&pdev->dev, regs,
 					    &rockchip_i2s_regmap_config);
 	if (IS_ERR(i2s->regmap)) {
@@ -1279,6 +1320,9 @@ static int rockchip_i2s_probe(struct platform_device *pdev)
 		goto err_suspend;
 	}
 
+	ret = devm_device_add_group(&pdev->dev, &andr36oid_i2s_group);
+	if (ret)
+		dev_warn(&pdev->dev, "I2S read-only snapshot unavailable: %d\n", ret);
 	return 0;
 
 err_suspend:
