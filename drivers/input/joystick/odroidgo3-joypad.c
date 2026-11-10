@@ -26,6 +26,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/input.h>
+#include <linux/andr36oid-keymap.h>
 #include <linux/input-polldev.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -137,6 +138,8 @@ struct bt_gpio {
 	int report_type;
 	/* report linux code */
 	int linux_code;
+	/* Validated native rg351 code, used for capabilities and every event. */
+	int out_code;
 	/* the code the last press went out as, so the release matches it */
 	int sent_code;
 	/* prev button value */
@@ -153,6 +156,7 @@ struct stick_cal {
 };
 
 struct joypad {
+	bool native_keycodes;
 	struct device *dev;
 	int poll_interval;
 	struct input_polled_dev *poll_dev;
@@ -1682,27 +1686,30 @@ static struct attribute_group joypad_attr_group = {
 
 /*----------------------------------------------------------------------------*/
 /*----------------------------------------------------------------------------*/
-/*
- * The code a button goes out as: with the sticks swapped (stick_swap), L3 and
- * R3 swap too. The R36S device trees send them as KEY_BACK and KEY_LEFTMETA
- * (the keylayout makes them THUMBL/THUMBR), others as BTN_THUMBL/BTN_THUMBR.
- */
+/* Preserve raw stick identity, but swap and test only native output codes. */
 static int joypad_out_key(struct joypad *joypad, struct input_dev *input,
-			  int type, int code)
+			  const struct bt_gpio *gpio)
 {
 	int other;
 
-	if (type != EV_KEY || !READ_ONCE(joypad->stick_swap))
-		return code;
-	switch (code) {
-	case KEY_BACK:		other = KEY_LEFTMETA; break;
-	case KEY_LEFTMETA:	other = KEY_BACK; break;
-	case BTN_THUMBL:	other = BTN_THUMBR; break;
-	case BTN_THUMBR:	other = BTN_THUMBL; break;
-	default:		return code;
+	if (!READ_ONCE(joypad->stick_swap))
+		return gpio->out_code;
+
+	switch (gpio->linux_code) {
+	case KEY_BACK: case BTN_THUMBL: case BTN_TRIGGER_HAPPY3:
+		if (gpio->out_code != BTN_TRIGGER_HAPPY3)
+			return gpio->out_code;
+		other = BTN_TRIGGER_HAPPY4;
+		break;
+	case KEY_LEFTMETA: case BTN_THUMBR: case BTN_TRIGGER_HAPPY4:
+		if (gpio->out_code != BTN_TRIGGER_HAPPY4)
+			return gpio->out_code;
+		other = BTN_TRIGGER_HAPPY3;
+		break;
+	default:
+		return gpio->out_code;
 	}
-	/* a console with one stick click only keeps it where it is */
-	return test_bit(other, input->keybit) ? other : code;
+	return test_bit(other, input->keybit) ? other : gpio->out_code;
 }
 
 static void joypad_gpio_check(struct input_polled_dev *poll_dev)
@@ -1728,10 +1735,9 @@ static void joypad_gpio_check(struct input_polled_dev *poll_dev)
 				continue;
 			if (value == gpio->active_level)
 				gpio->sent_code = joypad_out_key(joypad,
-						poll_dev->input, gpio->report_type,
-						gpio->linux_code);
+						poll_dev->input, gpio);
 			else if (!gpio->sent_code)
-				gpio->sent_code = gpio->linux_code;
+				gpio->sent_code = gpio->out_code;
 			input_event(poll_dev->input,
 				gpio->report_type,
 				gpio->sent_code,
@@ -2269,7 +2275,7 @@ static bool joypad_code_used(struct joypad *joypad, int count, int code)
 
 	for (i = 0; i < count; i++)
 		if (joypad->gpios[i].report_type == EV_KEY &&
-		    joypad->gpios[i].linux_code == code)
+		    joypad->gpios[i].out_code == code)
 			return true;
 	return false;
 }
@@ -2306,7 +2312,8 @@ static int joypad_extra_setup(struct device *dev, struct joypad *joypad,
 			continue;
 		}
 		while (code <= BTN_TRIGGER_HAPPY16 &&
-		       joypad_code_used(joypad, count + added, code))
+		       joypad_code_used(joypad, count + added,
+					a36_android_to_rg351_key(code)))
 			code++;
 		if (code > BTN_TRIGGER_HAPPY16) {
 			dev_warn(dev, "extra button '%s': no free code left, skipped\n",
@@ -2334,6 +2341,7 @@ static int joypad_extra_setup(struct device *dev, struct joypad *joypad,
 		gpio->active_level = active_level;
 		gpio->report_type = EV_KEY;
 		gpio->linux_code = code;
+		gpio->out_code = a36_android_to_rg351_key(code);
 		dev_info(dev, "extra button '%s': gpio %d, code %d, active %s\n",
 			 entry, num, code, active_level ? "high" : "low");
 		added++;
@@ -2350,6 +2358,19 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 	node = dev->of_node;
 	if (!node)
 		return -ENODEV;
+	{
+		const char *set;
+		int ret = of_property_read_string(node, "andr36oid,keycode-set", &set);
+
+		if (of_find_property(node, "andr36oid,keycode-set", NULL)) {
+			if (ret || (strcmp(set, "android") && strcmp(set, "rg351"))) {
+				dev_err(dev, "keymap: invalid keycode-set\n");
+				return -EINVAL;
+			}
+			joypad->native_keycodes = !strcmp(set, "rg351");
+		}
+	}
+
 
 	joypad->gpios = devm_kzalloc(dev, (joypad->bt_gpio_count +
 				joypad_count_extra()) *
@@ -2365,6 +2386,30 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 		enum of_gpio_flags flags;
 		struct bt_gpio *gpio = &joypad->gpios[nbtn++];
 		int error;
+		u32 code, type = EV_KEY;
+
+		if (of_property_read_u32(pp, "linux,code", &code)) {
+			dev_err(dev, "keymap: %pOF: missing/malformed code\n", pp);
+			of_node_put(pp);
+			return -EINVAL;
+		}
+		if (of_find_property(pp, "linux,input-type", NULL) &&
+		    of_property_read_u32(pp, "linux,input-type", &type)) {
+			dev_err(dev, "keymap: %pOF: malformed input type\n", pp);
+			of_node_put(pp);
+			return -EINVAL;
+		}
+		gpio->linux_code = code;
+		gpio->report_type = type;
+		gpio->out_code = joypad->native_keycodes ?
+			(a36_rg351_output_key(code) ? code : -EINVAL) :
+			a36_android_to_rg351_key(code);
+		if (type != EV_KEY || gpio->out_code < 0) {
+			dev_err(dev, "keymap: %pOF: unmapped code %u type %u (%s)\n",
+				pp, code, type, joypad->native_keycodes ? "rg351" : "android");
+			of_node_put(pp);
+			return -EINVAL;
+		}
 
 		gpio->num = of_get_gpio_flags(pp, 0, &flags);
 		if (gpio->num < 0) {
@@ -2389,14 +2434,7 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 				return error;
 			}
 		}
-		if (of_property_read_u32(pp, "linux,code", &gpio->linux_code)) {
-			dev_err(dev, "Button without keycode: 0x%x\n",
-				gpio->num);
-			return -EINVAL;
-		}
-		if (of_property_read_u32(pp, "linux,input-type",
-				&gpio->report_type))
-			gpio->report_type = EV_KEY;
+
 	}
 	if (nbtn == 0)
 		return -EINVAL;
@@ -2405,6 +2443,40 @@ static int joypad_gpio_setup(struct device *dev, struct joypad *joypad)
 		joypad_extra_setup(dev, joypad, nbtn, joypad_count_extra());
 
 	return	0;
+}
+
+static int joypad_validate_keymap(struct device *dev, struct joypad *joypad)
+{
+	DECLARE_BITMAP(keys, KEY_CNT);
+	unsigned int code;
+	int i, extras = 0;
+
+	bitmap_zero(keys, KEY_CNT);
+	for (i = 0; i < joypad->bt_gpio_count; i++) {
+		struct bt_gpio *gpio = &joypad->gpios[i];
+
+		if (gpio->report_type != EV_KEY ||
+		    !a36_rg351_output_key(gpio->out_code)) {
+			dev_err(dev, "keymap: invalid output code %d type %d\n",
+				gpio->out_code, gpio->report_type);
+			return -EINVAL;
+		}
+		if (test_and_set_bit(gpio->out_code, keys)) {
+			dev_err(dev, "keymap: duplicate output code %d\n", gpio->out_code);
+			return -EINVAL;
+		}
+		if (!a36_rg351_core_key(gpio->out_code))
+			extras++;
+	}
+	for (code = 0; code < KEY_CNT; code++) {
+		if (a36_rg351_core_key(code) && !test_bit(code, keys)) {
+			dev_err(dev, "keymap: missing core code %u\n", code);
+			return -EINVAL;
+		}
+	}
+	dev_info(dev, "keymap: validated 17 core keys + %d extras (%s DT)\n",
+		 extras, joypad->native_keycodes ? "rg351" : "android");
+	return 0;
 }
 
 static int rumble_play_effect(struct input_dev *dev, void *data, struct ff_effect *effect)
@@ -2679,7 +2751,7 @@ static int joypad_input_setup(struct device *dev, struct joypad *joypad)
 	for(nbtn = 0; nbtn < joypad->bt_gpio_count; nbtn++) {
 		struct bt_gpio *gpio = &joypad->gpios[nbtn];
 		input_set_capability(input, gpio->report_type,
-				gpio->linux_code);
+				gpio->out_code);
 	}
 
 	if (joypad->auto_repeat)
@@ -2691,10 +2763,16 @@ static int joypad_input_setup(struct device *dev, struct joypad *joypad)
 	if (joypad->button_irq)
 		joypad_button_irq_setup(dev, joypad);
 
+	/* Runtime marker, not a DT hint: only a successfully validated pad gets it. */
+	error = a36_rg351_mark_input(input);
+	if (error)
+		return error;
+
 	error = input_register_polled_device(poll_dev);
 	if (error) {
 		dev_err(dev, "unable to register polled device, err=%d\n",
 			error);
+		device_remove_software_node(&input->dev);
 		return error;
 	}
 	return 0;
@@ -2871,6 +2949,10 @@ static int joypad_probe(struct platform_device *pdev)
 		dev_err(dev, "dt parse error!(err = %d)\n", error);
 		return error;
 	}
+
+	error = joypad_validate_keymap(dev, joypad);
+	if (error)
+		return error;
 
 	mutex_init(&joypad->lock);
 	joypad->cal.deadzone = STICK_DEADZONE_DEFAULT;
