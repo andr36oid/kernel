@@ -368,6 +368,8 @@
 };
 
 &{/fiq-debugger} {
+	/* Preserve this board's existing UART5 routing; no new console. */
+	status = "okay";
 	rockchip,serial-id = <5>;
 	pinctrl-0 = <&uart5_xfer>;
 };

@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Soy Sauce Y3506 V05 two-command panel, clone issue 12. Hardware UNTESTED.
+ * Inherit the complete V04-Panel2 contract so pins, rails and timings cannot drift.
+ */
+#include "rk3326-r36s-clone-soysauce-v04-panel2.dts"
+
+/ {
+	model = "Soy Y3506 V05 issue12, KD35T133 Panel2 (UNTESTED)";
+};

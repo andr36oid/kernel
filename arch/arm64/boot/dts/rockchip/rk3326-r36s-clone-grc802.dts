@@ -3,7 +3,7 @@
 /dts-v1/;
 #include "rk3326-r36s-android.dtsi"
 
-/delete-node/ &joypad;
+/* Keep one canonical pad; stock working UDT uses the EE SARADC1 mux. */
 /delete-node/ &gpio_keys;
 /delete-node/ &leds;
 /delete-node/ &{/rk817-sound};
@@ -19,151 +19,11 @@
 		};
 	};
 
-	grc802_joystick: grc802-joystick {
-		compatible = "play_joystick";
-		io-channels = <&saradc 0>, <&saradc 1>, <&saradc 2>, <&saradc 3>;
-		io-channel-names = "joy_x", "joy_y", "joy_rx", "joy_ry";
-		poll-interval = <30>;
-		report-x-min = <0>; report-x-max = <1800>;
-		report-y-min = <0>; report-y-max = <1800>;
-		report-rx-min = <0>; report-rx-max = <1800>;
-		report-ry-min = <0>; report-ry-max = <1800>;
-	};
 
-	gamepad-keys {
-		compatible = "gpio-keys";
-		label = "GRC802 Gamepad";
-		pinctrl-names = "default";
-		pinctrl-0 = <&grc802_button_pins>;
-		r1 {
-			label = "r1";
-			linux,code = <311>;
-			gpios = <&gpio3 RK_PB3 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		r2 {
-			label = "r2";
-			linux,code = <313>;
-			gpios = <&gpio3 RK_PA0 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		l1 {
-			label = "l1";
-			linux,code = <310>;
-			gpios = <&gpio3 RK_PB5 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		l2 {
-			label = "l2";
-			linux,code = <312>;
-			gpios = <&gpio3 RK_PA6 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		a {
-			label = "a";
-			linux,code = <304>;
-			gpios = <&gpio3 RK_PC0 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		b {
-			label = "b";
-			linux,code = <305>;
-			gpios = <&gpio3 RK_PC1 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		x {
-			label = "x";
-			linux,code = <307>;
-			gpios = <&gpio3 RK_PC2 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		y {
-			label = "y";
-			linux,code = <308>;
-			gpios = <&gpio3 RK_PC3 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		left {
-			label = "left";
-			linux,code = <105>;
-			gpios = <&gpio3 RK_PC4 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		right {
-			label = "right";
-			linux,code = <106>;
-			gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		up {
-			label = "up";
-			linux,code = <103>;
-			gpios = <&gpio3 RK_PC6 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		down {
-			label = "down";
-			linux,code = <108>;
-			gpios = <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		select {
-			label = "select";
-			linux,code = <314>;
-			gpios = <&gpio3 RK_PD0 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		start {
-			label = "start";
-			linux,code = <315>;
-			gpios = <&gpio3 RK_PD1 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		fn {
-			label = "fn";
-			linux,code = <172>;
-			gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		mode {
-			label = "mode";
-			linux,code = <316>;
-			gpios = <&gpio2 RK_PB2 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		l3 {
-			label = "l3";
-			linux,code = <158>;
-			gpios = <&gpio2 RK_PB5 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		r3 {
-			label = "r3";
-			linux,code = <125>;
-			gpios = <&gpio2 RK_PB6 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		rocker0 {
-			label = "rocker0";
-			linux,code = <158>;
-			gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		rocker {
-			label = "rocker";
-			linux,code = <172>;
-			gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-		rocker1 {
-			label = "rocker1";
-			linux,code = <125>;
-			gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
-	};
 
-	/* Stock volume ladder shares ADC2 with right X. Preserve the stock layout. */
+
+
+	/* Stock volume ladder on ADC2; sticks now use the proven SARADC1 mux. */
 	adc-keys {
 		compatible = "adc-keys";
 		io-channels = <&saradc 2>;
@@ -196,21 +56,17 @@
 	};
 
 	rk817-sound {
-		compatible = "rockchip,multicodecs-card";
-		rockchip,card-name = "rockchip-rk817";
-		hp-det-gpio = <&gpio2 RK_PC6 GPIO_ACTIVE_HIGH>;
-		io-channels = <&saradc 1>;
-		io-channel-names = "adc-detect";
-		keyup-threshold-microvolt = <1800000>;
-		poll-interval = <100>;
-		rockchip,format = "i2s";
-		rockchip,mclk-fs = <256>;
-		rockchip,cpu = <&i2s1_2ch>;
-		rockchip,codec = <&rk817_codec>;
-		rockchip,codec-hp-det;
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,rk817-codec";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,widgets = "Microphone", "Mic Jack", "Headphone", "Headphone Jack";
+		simple-audio-card,routing = "MIC_IN", "Mic Jack", "Headphone Jack", "HPOL", "Headphone Jack", "HPOR";
+		simple-audio-card,hp-det-gpio = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&grc802_hp_det>;
-		play-pause-key { label = "playpause"; linux,code = <KEY_PLAYPAUSE>; press-threshold-microvolt = <2000>; };
+		simple-audio-card,cpu { sound-dai = <&i2s1_2ch>; };
+		simple-audio-card,codec { sound-dai = <&rk817_codec>; };
 	};
 };
 
@@ -350,7 +206,9 @@
 /* The base already routes DSI through VOPB, as on R46H. */
 &dmc_opp_table { opp-786000000 { status = "disabled"; }; };
 &uart2 { status = "disabled"; };
-&{/fiq-debugger} { rockchip,serial-id = <5>; pinctrl-0 = <&uart5_xfer>; };
+&{/fiq-debugger} {
+	/* Preserve this board's existing UART5 routing; no new console. */
+	status = "okay"; rockchip,serial-id = <5>; pinctrl-0 = <&uart5_xfer>; };
 &sdio { status = "disabled"; };
 &{/wireless-wlan} { status = "disabled"; };
 &u2phy_host { phy-supply = <&vbus_host>; };
@@ -579,4 +437,44 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart1_xfer &uart1_cts>;
 	status = "okay";
+};
+
+
+/* Latest reporter-corrected functioning UDT R36UltraX tree:
+ * SARADC1 behind A/B/EN = GPIO2_C0/B7/B3, map 2,3,1,0.
+ * The vendor micro,gamepad's button0..3 do NOT establish direct ADC axes.
+ * Preserve its actual native rg351 code namespace explicitly (no guessing).
+ */
+&joypad {
+	andr36oid,keycode-set = "rg351";
+	andr36oid,no-rumble;
+	pinctrl-0 = <&grc802_button_pins>;
+	io-channels = <&saradc 1>;
+	io-channel-names = "amux_adc";
+	amux-count = <4>;
+	amux-channel-mapping = <2 3 1 0>;
+	amux-a-gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_LOW>;
+	amux-b-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_LOW>;
+	amux-en-gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_LOW>;
+	invert-absx;
+	invert-absy;
+	/delete-property/ invert-absrx;
+	/delete-property/ invert-absry;
+	sw1 { gpios = <&gpio3 22 GPIO_ACTIVE_LOW>; linux,code = <544>; };
+	sw2 { gpios = <&gpio3 23 GPIO_ACTIVE_LOW>; linux,code = <545>; };
+	sw3 { gpios = <&gpio3 20 GPIO_ACTIVE_LOW>; linux,code = <546>; };
+	sw4 { gpios = <&gpio3 21 GPIO_ACTIVE_LOW>; linux,code = <547>; };
+	sw5 { gpios = <&gpio3 16 GPIO_ACTIVE_LOW>; linux,code = <305>; };
+	sw6 { gpios = <&gpio3 17 GPIO_ACTIVE_LOW>; linux,code = <304>; };
+	sw7 { gpios = <&gpio3 19 GPIO_ACTIVE_LOW>; linux,code = <308>; };
+	sw8 { gpios = <&gpio3 18 GPIO_ACTIVE_LOW>; linux,code = <307>; };
+	sw11 { gpios = <&gpio2 14 GPIO_ACTIVE_LOW>; linux,code = <707>; };
+	sw12 { gpios = <&gpio2 13 GPIO_ACTIVE_LOW>; linux,code = <706>; };
+	sw13 { gpios = <&gpio3 26 GPIO_ACTIVE_LOW>; linux,code = <708>; };
+	sw15 { gpios = <&gpio3 13 GPIO_ACTIVE_LOW>; linux,code = <310>; };
+	sw16 { gpios = <&gpio3 11 GPIO_ACTIVE_LOW>; linux,code = <311>; };
+	sw19 { gpios = <&gpio3 24 GPIO_ACTIVE_LOW>; linux,code = <704>; };
+	sw20 { gpios = <&gpio3 0 GPIO_ACTIVE_LOW>; linux,code = <313>; };
+	sw21 { gpios = <&gpio3 6 GPIO_ACTIVE_LOW>; linux,code = <312>; };
+	sw22 { gpios = <&gpio3 25 GPIO_ACTIVE_LOW>; linux,code = <705>; };
 };

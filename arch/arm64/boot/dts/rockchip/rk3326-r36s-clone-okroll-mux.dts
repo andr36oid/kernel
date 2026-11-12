@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* UNTESTED alternative: stock vendor rocker0/rocker/rocker1 pins match the
+ * K36 mux. Keep the existing direct-ADC profile available until tested;
+ * four declared vendor ADC channels alone do not prove direct wiring.
+ */
+#include "rk3326-r36s-clone-okroll.dts"
+
+/ {
+	model = "andr36oid OkRoll clone, mux input (untested alternative)";
+	play_joystick { status = "disabled"; };
+};
+
+&joypad {
+	/delete-property/ andr36oid,no-sticks;
+	pinctrl-0 = <&btn_pins &okroll_mux_pins>;
+	io-channels = <&saradc 1>;
+	io-channel-names = "amux_adc";
+	amux-count = <4>;
+	amux-channel-mapping = <2 3 1 0>;
+	amux-a-gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_LOW>;
+	amux-b-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_LOW>;
+	amux-en-gpios = <&gpio2 RK_PB4 GPIO_ACTIVE_LOW>;
+};
+
+&pinctrl {
+	okroll-mux {
+		okroll_mux_pins: mux-pins {
+			rockchip,pins =
+				<2 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PC0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};

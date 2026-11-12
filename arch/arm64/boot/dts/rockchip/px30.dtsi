@@ -1575,6 +1575,17 @@
 			opp-microvolt-L2 = <1050000>;
 			opp-microvolt-L3 = <1000000>;
 		};
+
+		opp-600000000 {
+			status = "disabled";
+			andr36oid,overclock;
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <1150000>;
+			opp-microvolt-L0 = <1150000>;
+			opp-microvolt-L1 = <1150000>;
+			opp-microvolt-L2 = <1150000>;
+			opp-microvolt-L3 = <1150000>;
+		};
 	};
 
 	px30s_gpu_opp_table: px30s-gpu-opp-table {
@@ -2158,6 +2169,30 @@
 			opp-microvolt-L2 = <1025000>;
 			opp-microvolt-L3 = <1000000>;
 			status = "disabled";
+		};
+
+
+
+		opp-928000000 {
+			status = "disabled";
+			andr36oid,overclock;
+			opp-hz = /bits/ 64 <928000000>;
+			opp-microvolt = <1100000>;
+			opp-microvolt-L0 = <1100000>;
+			opp-microvolt-L1 = <1100000>;
+			opp-microvolt-L2 = <1100000>;
+			opp-microvolt-L3 = <1100000>;
+		};
+
+		opp-1040000000 {
+			status = "disabled";
+			andr36oid,overclock;
+			opp-hz = /bits/ 64 <1040000000>;
+			opp-microvolt = <1150000>;
+			opp-microvolt-L0 = <1150000>;
+			opp-microvolt-L1 = <1150000>;
+			opp-microvolt-L2 = <1150000>;
+			opp-microvolt-L3 = <1150000>;
 		};
 	};
 

@@ -275,5 +275,8 @@
 	andr36oid,wait-for-panel;
 };
 
-/* USB OTG starts in peripheral mode. */
-#include "andr36oid-gr36-display-modules.dtsi"
+
+/* Preserve the hardware-tested USB peripheral default. */
+&u2phy_otg {
+	rockchip,default-otg-mode = "peripheral";
+};

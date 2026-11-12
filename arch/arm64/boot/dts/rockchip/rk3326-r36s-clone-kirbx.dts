@@ -119,3 +119,10 @@
 	regulator-boot-on;
 	regulator-always-on;
 };
+
+/* GPIO1_C2 is the active-low panel enable, not UART1 CTS on KirbX.
+ * This board has no UART1 Bluetooth consumer; SDIO remains disabled above.
+ */
+&uart1 {
+	status = "disabled";
+};

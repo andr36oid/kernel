@@ -304,7 +304,11 @@
 		interrupts = <GIC_SPI 127 IRQ_TYPE_LEVEL_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&uart2m1_xfer>;
-		status = "okay";
+		/* UART2 owns these pads on the base board. The FIQ driver
+		 * rejects an enabled serial port, after pinctrl has already run.
+		 * Disable this duplicate claimant; do not enable any console.
+		 */
+		status = "disabled";
 	};
 
 	leds: gpio_leds {

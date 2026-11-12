@@ -1,5 +1,0 @@
-// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
-/* Keep the hardware-tested headless USB default; display drivers load by hand. */
-&u2phy_otg {
-	rockchip,default-otg-mode = "peripheral";
-};
