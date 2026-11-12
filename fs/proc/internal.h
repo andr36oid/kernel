@@ -331,3 +331,9 @@ static inline void pde_force_lookup(struct proc_dir_entry *pde)
 	/* /proc/net/ entries can be changed under us by setns(CLONE_NEWNET) */
 	pde->proc_dops = &proc_net_dentry_ops;
 }
+
+#ifdef CONFIG_PROC_UID
+int proc_uid_init(void);
+#else
+static inline int proc_uid_init(void) { return 0; }
+#endif

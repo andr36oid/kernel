@@ -1,3 +1,4 @@
+#include <linux/proc_fs.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * The "user cache".
@@ -208,6 +209,7 @@ struct user_struct *alloc_uid(kuid_t uid)
 		spin_unlock_irq(&uidhash_lock);
 	}
 
+	proc_register_uid(uid);
 	return up;
 }
 
@@ -226,6 +228,7 @@ static int __init uid_cache_init(void)
 	uid_hash_insert(&root_user, uidhashentry(GLOBAL_ROOT_UID));
 	spin_unlock_irq(&uidhash_lock);
 
+	proc_register_uid(GLOBAL_ROOT_UID);
 	return 0;
 }
 subsys_initcall(uid_cache_init);

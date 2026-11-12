@@ -1,3 +1,4 @@
+#include <linux/cpufreq_times.h>
 /* drivers/misc/uid_sys_stats.c
  *
  * Copyright (C) 2014 - 2015 Google, Inc.
@@ -281,6 +282,8 @@ static ssize_t uid_remove_write(struct file *file,
 		kstrtol(end_uid, 10, &uid_end) != 0) {
 		return -EINVAL;
 	}
+
+	cpufreq_task_times_remove_uids(uid_start, uid_end);
 
 	for (; uid_start <= uid_end; uid_start++) {
 		struct uid_entry *uid_entry;

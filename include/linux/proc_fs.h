@@ -225,4 +225,10 @@ static inline struct pid_namespace *proc_pid_ns(struct super_block *sb)
 
 bool proc_ns_file(const struct file *file);
 
+#ifdef CONFIG_PROC_UID
+void proc_register_uid(kuid_t uid);
+#else
+static inline void proc_register_uid(kuid_t uid) { }
+#endif
+
 #endif /* _LINUX_PROC_FS_H */

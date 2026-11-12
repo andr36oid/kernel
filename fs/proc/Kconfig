@@ -107,3 +107,10 @@ config PROC_PID_ARCH_STATUS
 config PROC_CPU_RESCTRL
 	def_bool n
 	depends on PROC_FS
+
+config PROC_UID
+	bool "Per-UID proc CPU-frequency accounting compatibility"
+	depends on PROC_FS && CPU_FREQ_TIMES
+	help
+	  Provide the Android per-UID frequency/concurrency accounting files
+	  and /proc/uid/<uid>/time_in_state. UID views follow the reader namespace.
