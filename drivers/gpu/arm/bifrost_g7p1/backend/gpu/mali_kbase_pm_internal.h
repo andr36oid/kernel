@@ -530,6 +530,8 @@ void kbase_pm_do_poweron(struct kbase_device *kbdev, bool is_resume);
 void kbase_pm_do_poweroff(struct kbase_device *kbdev);
 
 #if defined(CONFIG_MALI_BIFROST_DEVFREQ) || defined(CONFIG_MALI_BIFROST_DVFS)
+void kbase_pm_get_dvfs_totals(struct kbase_device *kbdev, u32 *busy, u32 *idle);
+
 void kbase_pm_get_dvfs_metrics(struct kbase_device *kbdev,
 			       struct kbasep_pm_metrics *last,
 			       struct kbasep_pm_metrics *diff);

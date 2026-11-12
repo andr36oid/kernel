@@ -37,6 +37,12 @@
 
 #include "cpufreq-dt.h"
 #include "rockchip-cpufreq.h"
+#include "../opp/opp.h"
+
+struct undervolt_opp {
+	unsigned long rate;
+	struct dev_pm_opp_supply supply;
+};
 
 struct cluster_info {
 	struct list_head list_head;
@@ -52,6 +58,9 @@ struct cluster_info {
 	unsigned int regulator_count;
 	unsigned long rate;
 	unsigned long volt, mem_volt;
+	struct undervolt_opp *uv_stock;
+	int uv_count;
+	unsigned long uv_floor;
 };
 static LIST_HEAD(cluster_info_list);
 
@@ -1022,6 +1031,204 @@ static struct notifier_block rockchip_cpufreq_panic_notifier_block = {
 	.notifier_call = rockchip_cpufreq_panic_notifier,
 };
 
+/* 4.19 userspace ABI, reconciled to the 5.10 single-supply RK3326 OPP path.
+ * No boot-time operation: stock values are captured only on an explicit write.
+ * Reject coupled-rail/read-margin policies instead of bypassing
+ * their separate voltage ownership. Never change clocks from this callback.
+ */
+#define UNDERVOLT_MAX_UV 100000
+#define UNDERVOLT_STEP_UV 12500
+static DEFINE_MUTEX(undervolt_mutex);
+static unsigned int undervolt_uv;
+
+static unsigned long undervolt(unsigned long volt, unsigned int uv,
+			       unsigned long floor)
+{
+	if (volt <= floor || uv >= volt - floor)
+		return min(volt, floor);
+	return volt - uv;
+}
+
+static int uv_save_stock(struct cluster_info *ci, struct opp_table *table)
+{
+	struct dev_pm_opp *opp;
+	int count = 0, i = 0;
+
+	list_for_each_entry(opp, &table->opp_list, node)
+		count++;
+	if (!count)
+		return -ENODEV;
+	ci->uv_stock = kcalloc(count, sizeof(*ci->uv_stock), GFP_KERNEL);
+	if (!ci->uv_stock)
+		return -ENOMEM;
+	ci->uv_count = count;
+	ci->uv_floor = ULONG_MAX;
+	list_for_each_entry(opp, &table->opp_list, node) {
+		ci->uv_stock[i].rate = opp->rate;
+		ci->uv_stock[i++].supply = opp->supplies[0];
+		ci->uv_floor = min(ci->uv_floor, opp->supplies[0].u_volt);
+	}
+	return 0;
+}
+
+static int uv_update_table(struct cluster_info *ci, struct opp_table *table,
+			   unsigned int uv, unsigned long current_rate,
+			   struct dev_pm_opp_supply *output_supply)
+{
+	struct dev_pm_opp *opp;
+	int count = 0;
+	bool found = false;
+
+	/* Validate the entire topology before mutating any entry. */
+	list_for_each_entry(opp, &table->opp_list, node) {
+		if (count >= ci->uv_count ||
+		    ci->uv_stock[count].rate != opp->rate)
+			return -EAGAIN;
+		if (opp->rate == current_rate)
+			found = true;
+		count++;
+	}
+	if (count != ci->uv_count || !found)
+		return -EAGAIN;
+	count = 0;
+	list_for_each_entry(opp, &table->opp_list, node) {
+		struct dev_pm_opp_supply *stock = &ci->uv_stock[count++].supply;
+
+		opp->supplies[0] = *stock;
+		opp->supplies[0].u_volt = undervolt(stock->u_volt, uv, ci->uv_floor);
+		opp->supplies[0].u_volt_min = undervolt(stock->u_volt_min, uv, ci->uv_floor);
+		if (opp->rate == current_rate)
+			*output_supply = opp->supplies[0];
+	}
+	return 0;
+}
+
+static int uv_apply(struct cluster_info *ci, unsigned int uv)
+{
+	struct cpufreq_policy *policy;
+	struct cpufreq_freqs freqs;
+	struct monitor_dev_info *monitor = ci->mdev_info;
+	struct opp_table *table;
+	struct dev_pm_opp_supply target, previous, ignored;
+	struct dev_pm_opp *opp;
+	unsigned long rate;
+	bool monitor_locked = false;
+	int ret;
+
+	if (ci->regulator_count != 1 || ci->is_opp_shared_dsu ||
+	    (ci->opp_info.data && ci->opp_info.data->set_read_margin))
+		return -EOPNOTSUPP;
+	policy = cpufreq_cpu_get(cpumask_first(&ci->cpus));
+	if (!policy)
+		return -EAGAIN;
+	down_read(&policy->rwsem);
+	table = dev_pm_opp_get_opp_table(ci->opp_info.dev);
+	if (IS_ERR(table)) {
+		ret = PTR_ERR(table);
+		goto out_policy;
+	}
+	if (table->regulator_count != 1 || !table->regulators ||
+	    IS_ERR_OR_NULL(table->regulators[0])) {
+		ret = -EOPNOTSUPP;
+		goto out_table;
+	}
+	freqs.policy = policy;
+	freqs.old = policy->cur;
+	freqs.new = policy->cur;
+	freqs.flags = 0;
+	/* Same ordering as normal transitions: transition before voltage lock. */
+	cpufreq_freq_transition_begin(policy, &freqs);
+	if (monitor) {
+		if (!mutex_trylock(&monitor->volt_adjust_mutex)) {
+			ret = -EAGAIN;
+			goto out_transition;
+		}
+		monitor_locked = true;
+		/* Preserve the native 5.10 cold-voltage boost. Retry while warm. */
+		if (monitor->undervolt_cold) {
+			ret = -EBUSY;
+			goto out_monitor;
+		}
+	}
+	rate = policy->cur * 1000UL;
+	mutex_lock(&table->lock);
+	ret = ci->uv_stock ? 0 : uv_save_stock(ci, table);
+	if (!ret) {
+		bool found = false;
+
+		list_for_each_entry(opp, &table->opp_list, node)
+			if (opp->rate == rate) {
+				previous = opp->supplies[0];
+				found = true;
+				break;
+			}
+		ret = found ? uv_update_table(ci, table, uv, rate, &target) : -EAGAIN;
+	}
+	mutex_unlock(&table->lock);
+	if (!ret) {
+		ret = regulator_set_voltage_triplet(table->regulators[0],
+				target.u_volt_min, target.u_volt, target.u_volt_max);
+		if (ret) {
+			mutex_lock(&table->lock);
+			uv_update_table(ci, table, undervolt_uv, rate, &ignored);
+			mutex_unlock(&table->lock);
+			if (regulator_set_voltage_triplet(table->regulators[0],
+				previous.u_volt_min, previous.u_volt, previous.u_volt_max))
+				pr_err("rockchip-cpufreq: undervolt voltage rollback failed\n");
+		} else {
+			ci->volt = target.u_volt;
+			if (monitor) {
+				monitor->undervolt_uv = uv;
+				monitor->undervolt_floor = ci->uv_floor;
+			}
+		}
+	}
+out_monitor:
+	if (monitor_locked)
+		mutex_unlock(&monitor->volt_adjust_mutex);
+out_transition:
+	cpufreq_freq_transition_end(policy, &freqs, !!ret);
+out_table:
+	dev_pm_opp_put_opp_table(table);
+out_policy:
+	up_read(&policy->rwsem);
+	cpufreq_cpu_put(policy);
+	return ret;
+}
+
+static int undervolt_uv_set(const char *val, const struct kernel_param *kp)
+{
+	struct cluster_info *ci;
+	unsigned int uv;
+	int ret;
+
+	ret = kstrtouint(val, 0, &uv);
+	if (ret)
+		return ret;
+	if (uv > UNDERVOLT_MAX_UV)
+		return -EINVAL;
+	uv -= uv % UNDERVOLT_STEP_UV;
+	mutex_lock(&undervolt_mutex);
+	if (!of_machine_is_compatible("rockchip,rk3326") ||
+	    list_empty(&cluster_info_list) || !list_is_singular(&cluster_info_list)) {
+		ret = -ENODEV;
+		goto out;
+	}
+	ci = list_first_entry(&cluster_info_list, struct cluster_info, list_head);
+	ret = uv_apply(ci, uv);
+	if (!ret)
+		undervolt_uv = uv;
+out:
+	mutex_unlock(&undervolt_mutex);
+	return ret;
+}
+static const struct kernel_param_ops undervolt_uv_ops = {
+	.set = undervolt_uv_set,
+	.get = param_get_uint,
+};
+module_param_cb(undervolt_uv, &undervolt_uv_ops, &undervolt_uv, 0644);
+MODULE_PARM_DESC(undervolt_uv, "RK3326 CPU undervolt, 0-100000 uV in 12500 uV steps; default 0");
+
 static int __init rockchip_cpufreq_driver_init(void)
 {
 	struct cluster_info *cluster, *pos;
@@ -1083,6 +1290,7 @@ static int __init rockchip_cpufreq_driver_init(void)
 release_cluster_info:
 	list_for_each_entry_safe(cluster, pos, &cluster_info_list, list_head) {
 		list_del(&cluster->list_head);
+		kfree(cluster->uv_stock);
 		kfree(cluster);
 	}
 	return ret;

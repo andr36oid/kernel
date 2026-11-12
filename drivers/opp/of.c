@@ -764,7 +764,8 @@ static struct dev_pm_opp *_opp_add_static_v2(struct opp_table *opp_table,
 		goto free_opp;
 	}
 
-	new_opp->turbo = of_property_read_bool(np, "turbo-mode");
+	new_opp->turbo = of_property_read_bool(np, "turbo-mode") ||
+			 of_property_read_bool(np, "andr36oid,overclock");
 
 	new_opp->np = np;
 	new_opp->dynamic = false;
@@ -849,7 +850,11 @@ static int _of_add_opp_table_v2(struct device *dev, struct opp_table *opp_table)
 	mutex_unlock(&opp_table->lock);
 
 	/* We have opp-table node now, iterate over it and add OPPs */
-	for_each_available_child_of_node(opp_table->np, np) {
+	for_each_child_of_node(opp_table->np, np) {
+		/* Disabled OC nodes stay invisible to older recovery kernels. */
+		if (!of_device_is_available(np) &&
+		    !of_property_read_bool(np, "andr36oid,overclock"))
+			continue;
 		opp = _opp_add_static_v2(opp_table, dev, np);
 		if (IS_ERR(opp)) {
 			ret = PTR_ERR(opp);

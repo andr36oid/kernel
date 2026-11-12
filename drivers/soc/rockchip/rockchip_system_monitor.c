@@ -852,6 +852,16 @@ int rockchip_monitor_dev_high_temp_adjust(struct monitor_dev_info *info,
 }
 EXPORT_SYMBOL(rockchip_monitor_dev_high_temp_adjust);
 
+static unsigned long rockchip_monitor_undervolt(struct monitor_dev_info *info,
+					       unsigned long volt)
+{
+	if (!info->undervolt_uv || volt <= info->undervolt_floor)
+		return volt;
+	if (info->undervolt_uv >= volt - info->undervolt_floor)
+		return info->undervolt_floor;
+	return volt - info->undervolt_uv;
+}
+
 static int rockchip_adjust_low_temp_opp_volt(struct monitor_dev_info *info,
 					     bool is_low_temp)
 {
@@ -864,6 +874,8 @@ static int rockchip_adjust_low_temp_opp_volt(struct monitor_dev_info *info,
 	if (IS_ERR(opp_table))
 		return PTR_ERR(opp_table);
 
+	mutex_lock(&info->volt_adjust_mutex);
+	info->undervolt_cold = is_low_temp;
 	mutex_lock(&opp_table->lock);
 	list_for_each_entry(opp, &opp_table->opp_list, node) {
 		if (!opp->available)
@@ -887,7 +899,8 @@ static int rockchip_adjust_low_temp_opp_volt(struct monitor_dev_info *info,
 					opp->supplies[1].u_volt;
 			}
 		} else {
-			opp->supplies[0].u_volt_min = info->opp_table[i].volt;
+			opp->supplies[0].u_volt_min =
+				rockchip_monitor_undervolt(info, info->opp_table[i].volt);
 			opp->supplies[0].u_volt = opp->supplies[0].u_volt_min;
 			opp->supplies[0].u_volt_max =
 				info->opp_table[i].max_volt;
@@ -903,6 +916,7 @@ static int rockchip_adjust_low_temp_opp_volt(struct monitor_dev_info *info,
 		i++;
 	}
 	mutex_unlock(&opp_table->lock);
+	mutex_unlock(&info->volt_adjust_mutex);
 
 	dev_pm_opp_put_opp_table(opp_table);
 

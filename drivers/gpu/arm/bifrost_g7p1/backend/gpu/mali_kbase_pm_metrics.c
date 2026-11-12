@@ -350,6 +350,23 @@ void kbase_pm_get_dvfs_metrics(struct kbase_device *kbdev,
 	spin_unlock_irqrestore(&kbdev->pm.backend.metrics.lock, flags);
 }
 KBASE_EXPORT_TEST_API(kbase_pm_get_dvfs_metrics);
+
+/* Cumulative 256 ns totals. Do not consume devfreq's sampling window. */
+void kbase_pm_get_dvfs_totals(struct kbase_device *kbdev, u32 *busy, u32 *idle)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&kbdev->pm.backend.metrics.lock, flags);
+#if MALI_USE_CSF
+	kbase_pm_get_dvfs_utilisation_calc(kbdev);
+#else
+	kbase_pm_get_dvfs_utilisation_calc(kbdev, ktime_get());
+#endif
+	*busy = kbdev->pm.backend.metrics.values.time_busy;
+	*idle = kbdev->pm.backend.metrics.values.time_idle;
+	spin_unlock_irqrestore(&kbdev->pm.backend.metrics.lock, flags);
+}
+
 #endif
 
 #ifdef CONFIG_MALI_BIFROST_DVFS

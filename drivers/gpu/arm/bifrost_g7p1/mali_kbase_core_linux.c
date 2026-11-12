@@ -3130,6 +3130,20 @@ static ssize_t kbase_show_gpuinfo(struct device *dev,
 		product_id);
 }
 static DEVICE_ATTR(gpuinfo, S_IRUGO, kbase_show_gpuinfo, NULL);
+#ifdef CONFIG_MALI_BIFROST_DEVFREQ
+static ssize_t show_busy_idle(struct device *dev,
+		struct device_attribute *attr, char *const buf)
+{
+	struct kbase_device *kbdev = to_kbase_device(dev);
+	u32 busy, idle;
+
+	if (!kbdev)
+		return -ENODEV;
+	kbase_pm_get_dvfs_totals(kbdev, &busy, &idle);
+	return scnprintf(buf, PAGE_SIZE, "%u %u\n", busy, idle);
+}
+static DEVICE_ATTR(busy_idle, S_IRUGO, show_busy_idle, NULL);
+#endif
 
 /**
  * set_dvfs_period - Store callback for the dvfs_period sysfs file.
@@ -5048,6 +5062,9 @@ static struct attribute *kbase_attrs[] = {
 	&dev_attr_soft_job_timeout.attr,
 #endif /* !MALI_USE_CSF */
 	&dev_attr_gpuinfo.attr,
+#ifdef CONFIG_MALI_BIFROST_DEVFREQ
+	&dev_attr_busy_idle.attr,
+#endif
 	&dev_attr_dvfs_period.attr,
 	&dev_attr_pm_poweroff.attr,
 #if MALI_USE_CSF

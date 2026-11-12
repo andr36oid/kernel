@@ -94,6 +94,26 @@ static unsigned long find_available_min_freq(struct devfreq *devfreq)
 	return min_freq;
 }
 
+static unsigned long find_stock_max_freq(struct devfreq *devfreq)
+{
+	struct device *dev = devfreq->dev.parent;
+	struct dev_pm_opp *opp;
+	unsigned long freq = ULONG_MAX;
+	bool turbo;
+
+	while (freq) {
+		opp = dev_pm_opp_find_freq_floor(dev, &freq);
+		if (IS_ERR(opp))
+			return 0;
+		turbo = dev_pm_opp_is_turbo(opp);
+		dev_pm_opp_put(opp);
+		if (!turbo)
+			return freq;
+		freq--;
+	}
+	return 0;
+}
+
 static unsigned long find_available_max_freq(struct devfreq *devfreq)
 {
 	struct dev_pm_opp *opp;
@@ -881,6 +901,8 @@ struct devfreq *devfreq_add_device(struct device *dev,
 		goto err_devfreq;
 	err = dev_pm_qos_add_request(dev, &devfreq->user_max_freq_req,
 				     DEV_PM_QOS_MAX_FREQUENCY,
+				     find_stock_max_freq(devfreq) ?
+				     DIV_ROUND_UP(find_stock_max_freq(devfreq), HZ_PER_KHZ) :
 				     PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE);
 	if (err < 0)
 		goto err_devfreq;
@@ -1839,12 +1861,40 @@ static ssize_t load_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(load);
 
+/* andr36oid: the overclock (turbo) OPPs, lowest first; empty if none */
+static ssize_t overclock_frequencies_show(struct device *d,
+					  struct device_attribute *attr,
+					  char *buf)
+{
+	struct devfreq *df = to_devfreq(d);
+	struct device *dev = df->dev.parent;
+	struct dev_pm_opp *opp;
+	unsigned long freq = 0;
+	ssize_t count = 0;
+
+	for (;; freq++) {
+		opp = dev_pm_opp_find_freq_ceil(dev, &freq);
+		if (IS_ERR(opp))
+			break;
+		if (dev_pm_opp_is_turbo(opp))
+			count += scnprintf(&buf[count], PAGE_SIZE - count - 2,
+					   "%lu ", freq);
+		dev_pm_opp_put(opp);
+	}
+	if (count)
+		count--;
+	count += sprintf(&buf[count], "\n");
+	return count;
+}
+static DEVICE_ATTR_RO(overclock_frequencies);
+
 static struct attribute *devfreq_attrs[] = {
 	&dev_attr_name.attr,
 	&dev_attr_governor.attr,
 	&dev_attr_available_governors.attr,
 	&dev_attr_cur_freq.attr,
 	&dev_attr_available_frequencies.attr,
+	&dev_attr_overclock_frequencies.attr,
 	&dev_attr_target_freq.attr,
 	&dev_attr_polling_interval.attr,
 	&dev_attr_min_freq.attr,

@@ -129,6 +129,11 @@ struct monitor_dev_info {
 	bool is_low_temp;
 	bool is_high_temp;
 	bool is_low_temp_enabled;
+	/* Runtime CPU opt-in only; zero-initialized, no default rail change. */
+	unsigned int undervolt_uv;
+	unsigned long undervolt_floor;
+	bool undervolt_cold;
+
 };
 
 struct monitor_dev_profile {
