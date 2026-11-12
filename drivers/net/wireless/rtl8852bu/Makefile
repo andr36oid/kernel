@@ -24,7 +24,7 @@ EXTRA_CFLAGS += -Wno-missing-prototypes
 EXTRA_CFLAGS += -Wno-missing-declarations
 #EXTRA_CFLAGS += -Wno-cast-function-type
 
-EXTRA_CFLAGS += -Wno-enum-int-mismatch
+EXTRA_CFLAGS += $(call cc-disable-warning,enum-int-mismatch)
 #EXTRA_CFLAGS += -Wno-stringop-overread
 EXTRA_CFLAGS += -Wno-enum-conversion
 #EXTRA_CFLAGS += -Wno-int-in-bool-context
@@ -32,9 +32,9 @@ EXTRA_CFLAGS += -Wno-missing-prototypes
 #EXTRA_CFLAGS += -Wno-missing-declarations
 
 EXTRA_CFLAGS += -Wno-empty-body
-EXTRA_CFLAGS += -Wno-old-style-declaration
-EXTRA_CFLAGS += -Wno-restrict
-EXTRA_CFLAGS += -Wno-discarded-qualifiers
+EXTRA_CFLAGS += $(call cc-disable-warning,old-style-declaration)
+EXTRA_CFLAGS += $(call cc-disable-warning,restrict)
+EXTRA_CFLAGS += $(call cc-disable-warning,discarded-qualifiers)
 EXTRA_CFLAGS += -Wno-incompatible-pointer-types
 
 EXTRA_CFLAGS += -Wno-expansion-to-defined

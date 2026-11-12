@@ -29,6 +29,7 @@
 #include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/mmc.h>
@@ -433,40 +434,84 @@ fail:
 	return error;
 }
 
-static int sdio_writeb_comp(struct host_io_info *host)
+/* EXPERIMENTAL opt-in only. Zero keeps the vendor iteration budget exactly.
+ * Never shorten normal TX acknowledgements or suspend/sleep handshakes.
+ */
+static unsigned int pm_wake_ack_timeout_ms;
+
+static int rk915_set_pm_wake_ack_timeout(const char *val,
+					const struct kernel_param *kp)
+{
+	unsigned int timeout;
+	int ret = kstrtouint(val, 0, &timeout);
+
+	if (ret)
+		return ret;
+	if (timeout > 5000)
+		return -EINVAL;
+	WRITE_ONCE(*(unsigned int *)kp->arg, timeout);
+	return 0;
+}
+
+static const struct kernel_param_ops pm_wake_ack_timeout_ops = {
+	.set = rk915_set_pm_wake_ack_timeout,
+	.get = param_get_uint,
+};
+module_param_cb(pm_wake_ack_timeout_ms, &pm_wake_ack_timeout_ops,
+		&pm_wake_ack_timeout_ms, 0644);
+MODULE_PARM_DESC(pm_wake_ack_timeout_ms,
+	"EXPERIMENTAL: 0=legacy; 1..5000ms wake ACK budget during system resume only");
+
+static int sdio_writeb_comp_timeout(struct host_io_info *host,
+				  unsigned int timeout_ms)
 {
 	int val;
-	int onetime = 1; // us
-	int count = 500*1000; // wait total (onetime*count) ms
+	int onetime = 1; /* us, plus a complete CMD52 transaction per iteration */
+	int count = 500 * 1000;
+	ktime_t deadline = 0;
 
+	if (timeout_ms)
+		deadline = ktime_add_ms(ktime_get(), timeout_ms);
 	while (count--) {
 		if (hpriv->fw_error_processing)
 			return -1;
 
 		val = _sdio_readb(host, SDIO_HOST_WRITE_REQ_INT_STA);
 		if (val == 0) {
-			//RPU_INFO_SDIO("%s: %d\n", __func__, count);
-			return 0; // success
+			return 0;
 		} else if (val < 0) {
 			RPU_ERROR_SDIO("%s: error %d\n", __func__, val);
 			return -1;
 		}
+		/* A deadline cannot abort an already running MMC command. */
+		if (timeout_ms && ktime_compare(ktime_get(), deadline) >= 0) {
+			RPU_ERROR_SDIO("%s: EXPERIMENTAL PM wake ACK budget %u ms expired, val=%d\n",
+				      __func__, timeout_ms, val);
+			return -1;
+		}
 		udelay(onetime);
-		//RPU_INFO_SDIO("count = %d, val = %d\n", count, val);
 	}
 
 	RPU_ERROR_SDIO("%s: timeout val = %d\n", __func__, val);
-	return -1; // wait timeout failed
+	return -1;
+}
+
+static int sdio_writeb_comp(struct host_io_info *host)
+{
+	return sdio_writeb_comp_timeout(host, 0);
 }
 
 static int sdio_notify_fw_pm(struct host_io_info *host, int wakeup)
 {
 #if NOTIFY_M0_SLEEP
-	int msg = wakeup?IO_NOTIFY_WAKEUP:IO_NOTIFY_SLEEP;
+	int msg = wakeup ? IO_NOTIFY_WAKEUP : IO_NOTIFY_SLEEP;
+	unsigned int timeout_ms = 0;
 
-	RPU_INFO_SDIO("notify m0 %s\n", wakeup?"wakeup":"sleep");
+	if (wakeup && hpriv->during_pm_resume)
+		timeout_ms = READ_ONCE(pm_wake_ack_timeout_ms);
+	RPU_INFO_SDIO("notify m0 %s\n", wakeup ? "wakeup" : "sleep");
 	_sdio_writeb(host, IO_NOTIFY_ADDR, msg);
-	return sdio_writeb_comp(host);
+	return sdio_writeb_comp_timeout(host, timeout_ms);
 #else
 	return 0;
 #endif

@@ -142,6 +142,21 @@ static void rtw_dev_shutdown(struct device *dev)
 /* DID_USB_v916_20130116 */
 static struct usb_device_id rtw_usb_id_tbl[] = {
 #ifdef CONFIG_RTL8188E
+	/* andr36oid 4.19 USB ID coverage. */
+	{USB_DEVICE(0x0DF6, 0x0076), .driver_info = RTL8188E}, /* Sitecom N150 v2 */
+	{USB_DEVICE(0x2001, 0x330F), .driver_info = RTL8188E}, /* DLink DWA-125 REV D1 */
+	{USB_DEVICE(0x2001, 0x3310), .driver_info = RTL8188E}, /* Dlink DWA-123 REV D1 */
+	{USB_DEVICE(0x2001, 0x3311), .driver_info = RTL8188E}, /* DLink GO-USB-N150 REV B1 */
+	{USB_DEVICE(0x2001, 0x331B), .driver_info = RTL8188E}, /* D-Link DWA-121 rev B1 */
+	{USB_DEVICE(0x056E, 0x4008), .driver_info = RTL8188E}, /* Elecom WDC-150SU2M */
+	{USB_DEVICE(0x2357, 0x010c), .driver_info = RTL8188E}, /* TP-Link TL-WN722N v2 */
+	{USB_DEVICE(0x2357, 0x0111), .driver_info = RTL8188E}, /* TP-Link TL-WN727N v5.21 */
+	{USB_DEVICE(0x2C4E, 0x0102), .driver_info = RTL8188E}, /* MERCUSYS MW150US v2 */
+	{USB_DEVICE(0x0B05, 0x18F0), .driver_info = RTL8188E}, /* ASUS USB-N10 Nano B1 */
+	{USB_DEVICE(0x7392, 0xb811), .driver_info = RTL8188E}, /* Edimax EW-7811Un V2 */
+#endif
+
+#ifdef CONFIG_RTL8188E
 	/*=== Realtek demoboard ===*/
 	{USB_DEVICE(USB_VENDER_ID_REALTEK, 0x8179), .driver_info = RTL8188E}, /* 8188EUS */
 	{USB_DEVICE(USB_VENDER_ID_REALTEK, 0x0179), .driver_info = RTL8188E}, /* 8188ETV */

@@ -111,6 +111,8 @@ static const struct xpad_device {
 	u8 mapping;
 	u8 xtype;
 } xpad_device[] = {
+	{ 0x1532, 0x0a57, "Razer Wolverine V3 Pro (Wired)", 0, XTYPE_XBOX360 },
+	{ 0x1532, 0x0a59, "Razer Wolverine V3 Pro (2.4 GHz Dongle)", 0, XTYPE_XBOX360 },
 	{ 0x0079, 0x18d4, "GPD Win 2 X-Box Controller", 0, XTYPE_XBOX360 },
 	{ 0x03eb, 0xff01, "Wooting One (Legacy)", 0, XTYPE_XBOX360 },
 	{ 0x03eb, 0xff02, "Wooting Two (Legacy)", 0, XTYPE_XBOX360 },
@@ -433,6 +435,34 @@ static const signed short xpad_abs_triggers[] = {
 	{ XPAD_XBOXONE_VENDOR_PROTOCOL((vend), 208) }
 
 static const struct usb_device_id xpad_table[] = {
+	/* andr36oid: retain 4.19 controller vendor/protocol families. */
+	XPAD_XBOX360_VENDOR(0x0351),
+	XPAD_XBOX360_VENDOR(0x03f0),
+	XPAD_XBOX360_VENDOR(0x0b05),
+	XPAD_XBOX360_VENDOR(0x0db0),
+	XPAD_XBOX360_VENDOR(0x16d0),
+	XPAD_XBOX360_VENDOR(0x17ef),
+	XPAD_XBOX360_VENDOR(0x1a86),
+	XPAD_XBOX360_VENDOR(0x1ee9),
+	XPAD_XBOX360_VENDOR(0x20bc),
+	XPAD_XBOX360_VENDOR(0x2345),
+	XPAD_XBOX360_VENDOR(0x2993),
+	XPAD_XBOX360_VENDOR(0x2c22),
+	XPAD_XBOX360_VENDOR(0x2dc8),
+	XPAD_XBOX360_VENDOR(0x3507),
+	XPAD_XBOX360_VENDOR(0x3537),
+	XPAD_XBOX360_VENDOR(0x3651),
+	XPAD_XBOX360_VENDOR(0x37d7),
+	XPAD_XBOX360_VENDOR(0x3958),
+	XPAD_XBOX360_VENDOR(0x413d),
+	XPAD_XBOXONE_VENDOR(0x044f),
+	XPAD_XBOXONE_VENDOR(0x0b05),
+	XPAD_XBOXONE_VENDOR(0x294b),
+	XPAD_XBOXONE_VENDOR(0x2e95),
+	XPAD_XBOXONE_VENDOR(0x3285),
+	XPAD_XBOXONE_VENDOR(0x3537),
+	XPAD_XBOXONE_VENDOR(0x366c),
+
 	{ USB_INTERFACE_INFO('X', 'B', 0) },	/* X-Box USB-IF not approved class */
 	XPAD_XBOX360_VENDOR(0x0079),		/* GPD Win 2 Controller */
 	XPAD_XBOX360_VENDOR(0x03eb),		/* Wooting Keyboards (Legacy) */
