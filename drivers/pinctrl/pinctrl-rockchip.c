@@ -4664,6 +4664,76 @@ static int rk3308_soc_data_init(struct rockchip_pinctrl *info)
 
 }
 
+static char rockchip_pull_char(int pull)
+{
+	switch (pull) {
+	case PIN_CONFIG_BIAS_PULL_UP:
+		return 'u';
+	case PIN_CONFIG_BIAS_PULL_DOWN:
+		return 'd';
+	case PIN_CONFIG_BIAS_DISABLE:
+		return '-';
+	case PIN_CONFIG_BIAS_BUS_HOLD:
+		return 'k';
+	default:
+		return '?';
+	}
+}
+
+static ssize_t gpio_levels_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct rockchip_pinctrl *info = dev_get_drvdata(dev);
+	struct rockchip_pin_ctrl *ctrl = info->ctrl;
+	ssize_t len = 0;
+	int b, pin;
+
+	for (b = 0; b < ctrl->nr_banks; b++) {
+		struct rockchip_pin_bank *bank = &ctrl->pin_banks[b];
+		const struct rockchip_gpio_regs *regs = bank->gpio_regs;
+		void __iomem *base = bank->reg_base;
+		u32 level, dir;
+
+		if (IS_ERR_OR_NULL(base) || !regs || IS_ERR_OR_NULL(bank->clk) ||
+		    clk_enable(bank->clk)) {
+			len += scnprintf(buf + len, PAGE_SIZE - len,
+					 "%s unavailable\n", bank->name);
+			continue;
+		}
+		level = readl(base + regs->ext_port);
+		dir = readl(base + regs->port_ddr);
+		/* gpio v2 (has a version register) splits it in two halves */
+		if (regs->version_id)
+			dir = (dir & 0xffff) | (readl(base + regs->port_ddr + 4) << 16);
+		clk_disable(bank->clk);
+
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+				 "%s level=0x%08x dir=0x%08x mux=",
+				 bank->name, level, dir);
+		for (pin = 0; pin < bank->nr_pins && len < PAGE_SIZE - 2; pin++) {
+			int mux = rockchip_get_mux(bank, pin);
+
+			buf[len++] = mux < 0 ? '?' : hex_asc[mux & 0xf];
+		}
+		len += scnprintf(buf + len, PAGE_SIZE - len, " pull=");
+		for (pin = 0; pin < bank->nr_pins && len < PAGE_SIZE - 2; pin++)
+			buf[len++] = rockchip_pull_char(rockchip_get_pull(bank, pin));
+		len += scnprintf(buf + len, PAGE_SIZE - len, "\n");
+	}
+
+	return len;
+}
+
+static DEVICE_ATTR(gpio_levels, 0400, gpio_levels_show, NULL);
+
+static struct attribute *rockchip_gpio_debug_attrs[] = {
+	&dev_attr_gpio_levels.attr,
+	NULL,
+};
+static const struct attribute_group rockchip_gpio_debug_group = {
+	.attrs = rockchip_gpio_debug_attrs,
+};
+
 static int rockchip_pinctrl_probe(struct platform_device *pdev)
 {
 	struct rockchip_pinctrl *info;
@@ -4740,6 +4810,12 @@ static int rockchip_pinctrl_probe(struct platform_device *pdev)
 		return ret;
 
 	platform_set_drvdata(pdev, info);
+	/* Optional read-only debug ABI: never fail GPIO/Wi-Fi bring-up on a
+	 * sysfs allocation failure. Banks may report unavailable until probed.
+	 */
+	if (devm_device_add_group(dev, &rockchip_gpio_debug_group))
+		dev_warn(dev, "could not create read-only gpio_levels\n");
+
 	g_pctldev = info->pctl_dev;
 
 	ret = of_platform_populate(np, NULL, NULL, &pdev->dev);

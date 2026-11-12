@@ -33,6 +33,8 @@
 #include <linux/acpi.h>
 #include <linux/irqdomain.h>
 #include <linux/interrupt.h>
+#include <linux/irqdesc.h>
+#include <linux/wakeup_reason.h>
 #include <linux/percpu.h>
 #include <linux/slab.h>
 #include <linux/irqchip.h>
@@ -665,6 +667,47 @@ void gic_dist_save(struct gic_chip_data *gic)
  * handled normally, but any edge interrupts that occurred will not be seen by
  * the GIC and need to be handled by the platform-specific wakeup source.
  */
+/* Read pending enabled SPIs before distributor restore/IRQ re-enable.
+ * Non-wake IRQs are evidence only: do not mislabel a timer or resume-side
+ * interrupt as the cause. CPU-cluster idle exits are not system resumes.
+ */
+static void gic_log_pending_wake_irqs(struct gic_chip_data *gic)
+{
+	void __iomem *base = gic_data_dist_base(gic);
+	unsigned int first;
+
+	if (system_state != SYSTEM_SUSPEND || !base)
+		return;
+	for (first = 32; first < gic->gic_irqs; first += 32) {
+		unsigned long pending = readl_relaxed(base + GIC_DIST_PENDING_SET +
+						    first / 8) &
+					gic->saved_spi_enable[first / 32];
+		unsigned int bit;
+
+		for_each_set_bit(bit, &pending, 32) {
+			unsigned int hwirq = first + bit;
+			unsigned int irq;
+			struct irq_desc *desc;
+			bool wake = false;
+			const char *name = "unmapped/chained";
+
+			if (hwirq >= gic->gic_irqs)
+				break;
+			irq = irq_find_mapping(gic->domain, hwirq);
+			desc = irq_to_desc(irq);
+			if (irq && desc) {
+				wake = irqd_is_wakeup_set(irq_desc_get_irq_data(desc));
+				if (desc->action && desc->action->name)
+					name = desc->action->name;
+				if (wake)
+					log_irq_wakeup_reason(irq);
+			}
+			pr_info("WAKE-DIAG: pending GIC hwirq=%u irq=%u wake=%u name=%s\n",
+				hwirq, irq, wake, name);
+		}
+	}
+}
+
 void gic_dist_restore(struct gic_chip_data *gic)
 {
 	unsigned int gic_irqs;
@@ -679,6 +722,8 @@ void gic_dist_restore(struct gic_chip_data *gic)
 
 	if (!dist_base)
 		return;
+
+	gic_log_pending_wake_irqs(gic);
 
 	writel_relaxed(GICD_DISABLE, dist_base + GIC_DIST_CTRL);
 

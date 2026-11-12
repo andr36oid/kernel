@@ -170,6 +170,8 @@ void log_irq_wakeup_reason(int irq)
 	spin_unlock_irqrestore(&wakeup_reason_lock, flags);
 }
 
+EXPORT_SYMBOL_GPL(log_irq_wakeup_reason);
+
 void log_threaded_irq_wakeup_reason(int irq, int parent_irq)
 {
 	struct wakeup_irq_node *parent;
@@ -321,6 +323,8 @@ static ssize_t last_resume_reason_show(struct kobject *kobj,
 	else if (wakeup_reason == RESUME_ABNORMAL)
 		buf_offset = scnprintf(buf, PAGE_SIZE, "-1 %s",
 				       non_irq_wake_reason);
+	else
+		buf_offset = scnprintf(buf, PAGE_SIZE, "-1 unknown\n");
 
 	spin_unlock_irqrestore(&wakeup_reason_lock, flags);
 

@@ -14,6 +14,8 @@
 #include <linux/gpio/driver.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/kernel.h>
+#include <linux/wakeup_reason.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -486,6 +488,29 @@ static void rockchip_irq_resume(struct irq_data *d)
 {
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(d);
 	struct rockchip_pin_bank *bank = gc->private;
+
+	/* Firmware may return with an edge latched, before Linux has had a
+	 * chance to run irq_pm_check_wakeup(). Snapshot before restoring masks;
+	 * never acknowledge, unmask or change wake policy for diagnostics.
+	 */
+	if (system_state == SYSTEM_SUSPEND) {
+		u32 status = irq_reg_readl(gc, bank->gpio_regs->int_status);
+		u32 raw = irq_reg_readl(gc, bank->gpio_regs->int_rawstatus);
+		unsigned long pending = status & gc->wake_active;
+		unsigned int bit;
+
+		pr_info("WAKE-DIAG: GPIO %s status=%08x raw=%08x wake=%08x\n",
+			bank->name, status, raw, gc->wake_active);
+		for_each_set_bit(bit, &pending, GPIO_MAX_PINS) {
+			unsigned int irq = irq_find_mapping(bank->domain, bit);
+
+			if (irq) {
+				log_irq_wakeup_reason(irq);
+				pr_info("WAKE-DIAG: pending wake GPIO %s pin=%u irq=%u\n",
+					bank->name, bit, irq);
+			}
+		}
+	}
 
 	irq_reg_writel(gc, bank->saved_masks, bank->gpio_regs->int_mask);
 }

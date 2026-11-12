@@ -9,6 +9,7 @@
 #include <linux/device.h>
 #include <linux/export.h>
 #include <linux/interrupt.h>
+#include <linux/wakeup_reason.h>
 #include <linux/irq.h>
 #include <linux/irqdesc.h>
 #include <linux/irqdomain.h>
@@ -377,6 +378,13 @@ static void regmap_irq_log_wake(struct regmap_irq_chip_data *data, int hwirq)
 	unsigned int count = suspend_stats.success + suspend_stats.fail + 1;
 	unsigned int virq;
 	struct irq_desc *desc;
+
+	/* Refine an already captured GPIO/GIC parent into RTC/key/etc. The
+	 * logger ignores unrelated parents and calls outside its resume window.
+	 */
+	virq = irq_find_mapping(data->domain, hwirq);
+	if (virq)
+		log_threaded_irq_wakeup_reason(virq, data->irq);
 
 	if (pm_suspend_target_state == PM_SUSPEND_ON ||
 	    pm_wakeup_irq() != data->irq || data->wake_logged == count)
