@@ -1020,6 +1020,9 @@ static inline bool arch_wants_old_prefaulted_pte(void)
 }
 #define arch_wants_old_prefaulted_pte	arch_wants_old_prefaulted_pte
 
+/* MGLRU must respect ARMv8.0 CPUs without hardware-managed AF. */
+#define arch_has_hw_pte_young cpu_has_hw_af
+
 #endif /* !__ASSEMBLY__ */
 
 #endif /* __ASM_PGTABLE_H */
