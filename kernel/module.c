@@ -10,6 +10,7 @@
 #include <linux/export.h>
 #include <linux/extable.h>
 #include <linux/moduleloader.h>
+#include <linux/andr36oid-build.h>
 #include <linux/module_signature.h>
 #include <linux/trace_events.h>
 #include <linux/init.h>
@@ -3578,6 +3579,45 @@ static bool blacklisted(const char *module_name)
 }
 core_param(module_blacklist, module_blacklist, charp, 0400);
 
+/*
+ * andr36oid: Kernel Tweaks > No Wi-Fi and Bluetooth puts module.no_radios=1 on the
+ * command line. Then no Wi-Fi or Bluetooth chip driver loads, so none powers a chip or
+ * uploads its firmware: on consoles with a Wi-Fi chip wired to the USB port, that leaves
+ * the port free for OTG. The chip drivers are all modules here; a module counts as one
+ * when it links against the Wi-Fi, Bluetooth or rfkill stack (built in), or is one of
+ * the firmware loaders that don't (radio_loaders). Drivers that build on a refused
+ * module fail with it.
+ */
+static bool no_radios;
+module_param(no_radios, bool, 0444);
+
+static const char * const radio_loaders[] = { "aic_load_fw" };
+static const char * const radio_prefixes[] = {
+	"cfg80211_", "ieee80211_", "__ieee80211_", "wiphy_", "regulatory_",
+	"hci_", "__hci_", "bt_", "rfkill_",
+};
+
+static bool is_radio_module(const struct load_info *info)
+{
+	const Elf_Shdr *symsec = &info->sechdrs[info->index.sym];
+	const Elf_Sym *sym = (void *)info->hdr + symsec->sh_offset;
+	unsigned int i, j, n = symsec->sh_size / sizeof(Elf_Sym);
+
+	for (i = 0; i < ARRAY_SIZE(radio_loaders); i++)
+		if (!strcmp(info->name, radio_loaders[i]))
+			return true;
+	for (i = 1; i < n; i++) {
+		const char *name = info->strtab + sym[i].st_name;
+
+		if (sym[i].st_shndx != SHN_UNDEF)
+			continue;
+		for (j = 0; j < ARRAY_SIZE(radio_prefixes); j++)
+			if (!strncmp(name, radio_prefixes[j], strlen(radio_prefixes[j])))
+				return true;
+	}
+	return false;
+}
+
 static struct module *layout_and_allocate(struct load_info *info, int flags)
 {
 	struct module *mod;
@@ -4017,6 +4057,28 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	if (err)
 		goto free_copy;
 
+	/* uname/vermagic is deliberately shared by G2/G7. Prevent accidental
+	 * cross-variant or untagged module loads before any module code runs.
+	 * This is an integration guard, not a security boundary against root.
+	 */
+	{
+		const char *variant = get_modinfo(info, "a36_variant");
+		const char *flavor = get_modinfo(info, "a36_flavor");
+
+		if (!variant || strcmp(variant, A36_BUILD_VARIANT)) {
+			pr_err("%s: build variant %s; kernel requires %s\n",
+			       info->name, variant ?: "missing", A36_BUILD_VARIANT);
+			err = -ENOEXEC;
+			goto free_copy;
+		}
+		if (!flavor || strcmp(flavor, A36_BUILD_FLAVOR)) {
+			pr_err("%s: build flavor %s; kernel requires %s\n",
+			       info->name, flavor ?: "missing", A36_BUILD_FLAVOR);
+			err = -ENOEXEC;
+			goto free_copy;
+		}
+	}
+
 	/*
 	 * Now that we know we have the correct module name, check
 	 * if it's blacklisted.
@@ -4024,6 +4086,13 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	if (blacklisted(info->name)) {
 		err = -EPERM;
 		pr_err("Module %s is blacklisted\n", info->name);
+		goto free_copy;
+	}
+
+	/* No scanning or radio policy change unless the owner opted in. */
+	if (no_radios && is_radio_module(info)) {
+		pr_info("%s: radio load blocked by explicit module.no_radios\n", info->name);
+		err = -EPERM;
 		goto free_copy;
 	}
 

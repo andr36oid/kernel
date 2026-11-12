@@ -2265,6 +2265,9 @@ static void add_header(struct buffer *b, struct module *mod)
 	buf_printf(b, "BUILD_SALT;\n");
 	buf_printf(b, "\n");
 	buf_printf(b, "MODULE_INFO(vermagic, VERMAGIC_STRING);\n");
+	buf_printf(b, "#include <linux/andr36oid-build.h>\n");
+	buf_printf(b, "MODULE_INFO(a36_variant, A36_BUILD_VARIANT);\n");
+	buf_printf(b, "MODULE_INFO(a36_flavor, A36_BUILD_FLAVOR);\n");
 	buf_printf(b, "MODULE_INFO(name, KBUILD_MODNAME);\n");
 	buf_printf(b, "\n");
 	buf_printf(b, "__visible struct module __this_module\n");

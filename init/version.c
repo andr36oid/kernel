@@ -9,6 +9,11 @@
 
 #include <generated/compile.h>
 #include <linux/build-salt.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
+#include <linux/andr36oid-build.h>
 #include <linux/export.h>
 #include <linux/uts.h>
 #include <linux/utsname.h>
@@ -53,3 +58,43 @@ const char linux_proc_banner[] =
 	" (" LINUX_COMPILER ") %s\n";
 
 BUILD_SALT;
+
+/* Immutable identity independent of the owner-selected uname release suffix. */
+static ssize_t variant_show(struct kobject *kobj, struct kobj_attribute *attr,
+			    char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n", A36_BUILD_VARIANT);
+}
+static ssize_t build_show(struct kobject *kobj, struct kobj_attribute *attr,
+			  char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n", UTS_VERSION);
+}
+static ssize_t flavor_show(struct kobject *kobj, struct kobj_attribute *attr,
+			   char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%s\n", A36_BUILD_FLAVOR);
+}
+static struct kobj_attribute variant_attr = __ATTR_RO(variant);
+static struct kobj_attribute build_attr = __ATTR_RO(build);
+static struct kobj_attribute flavor_attr = __ATTR_RO(flavor);
+static struct attribute *a36_build_attrs[] = {
+	&variant_attr.attr, &build_attr.attr, &flavor_attr.attr, NULL,
+};
+static const struct attribute_group a36_build_group = {
+	.attrs = a36_build_attrs,
+};
+static int __init a36_build_identity_init(void)
+{
+	struct kobject *kobj;
+	int ret;
+
+	kobj = kobject_create_and_add("andr36oid", kernel_kobj);
+	if (!kobj)
+		return -ENOMEM;
+	ret = sysfs_create_group(kobj, &a36_build_group);
+	if (ret)
+		kobject_put(kobj);
+	return ret;
+}
+subsys_initcall(a36_build_identity_init);
