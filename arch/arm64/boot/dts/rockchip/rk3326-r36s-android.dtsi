@@ -344,6 +344,7 @@
 		color-names = "green", "red";
 		color-states = <0>, <1>;
 		andr36oid,battery = "11 green 0 red";
+		andr36oid,sleep = "red";
 		andr36oid,charging = "green";
 		andr36oid,mode = "battery";
 		status = "disabled";

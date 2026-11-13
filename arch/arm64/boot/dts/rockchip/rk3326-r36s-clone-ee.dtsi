@@ -131,6 +131,7 @@
 	color-names = "off", "blue", "red", "purple";
 	color-states = <2 2>, <1 2>, <2 1>, <1 1>;
 	andr36oid,battery = "11 blue 0 red";
+	andr36oid,sleep = "off";
 	andr36oid,charging = "red";
 	andr36oid,full = "blue";
 	/* run by boot.ini, so it is blue from power-on; U-Boot calls GPIO0_A0 a0 */

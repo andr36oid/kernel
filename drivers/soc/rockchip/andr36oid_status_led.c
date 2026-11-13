@@ -13,6 +13,8 @@
  *   notify    blinking for a notification (the lights HAL)
  *   charging  a colour while a charger is in ("release" leaves the LED to
  *             the hardware, "battery" keeps following the battery rules)
+ *   sleep     on battery while suspended, a board colour or "keep";
+ *             a user-selected rest colour or "release" is left alone
  *   mode      "release" (all pins floating: what the board does without
  *             software), "battery" (colour by charge level) or a colour
  *
@@ -22,6 +24,10 @@
  * flicker at the edge. The rules run here, not in Android, so they also work
  * while charging switched off. Blinking stops in sleep; the LED then holds
  * the first colour, or the notification colour while one is waiting.
+ * Sleep's colour applies only without a charger or notification, never over
+ * the user's rest/release mode. DT sleep defaults are off where the table
+ * has a dark off, red on the genuine R36S, otherwise the rest colour. No
+ * new pin state is invented for boards that cannot turn the LED dark.
  *
  * The first colour of the table is what the LED shows at rest: "off", or
  * green on the genuine R36S.
@@ -41,6 +47,12 @@
  *   mode, battery, charging, full (rw)   see above; "full" is like
  *               "charging" for a full battery with the charger still in.
  *               "default" goes back to the DT's andr36oid,<name> value
+ *   sleep (rw) "keep", a single colour name, or "default" (andr36oid,sleep).
+ *               Without a DT value: off if named in the table, else rest.
+ *               Named writes/keep are explicit; default returns to automatic.
+ *               On a custom table, automatic prefers the tester's "off",
+ *               else the DT's name if present, else rest. Explicit choices
+ *               survive by name (missing -> rest). table=default resets to DT.
  *   notify (rw) "<colour> <on ms> <off ms>" or "none"; off 0 is steady
  *   raw (rw)    one state per pin, 0 low, 1 high, 2 floating, or "none"
  *   state (r)   what it shows now and why
@@ -70,6 +82,7 @@
 /* a colour, or two to blink between; -1 none. RELEASE: all pins floating */
 #define RELEASE		-2
 #define FOLLOW		-3	/* charging/full: keep the battery rules */
+#define SLEEP_KEEP	-4	/* suspended: preserve the normal first colour */
 
 struct show {
 	int a, b;
@@ -95,6 +108,9 @@ struct status_led {
 	struct level zones[MAX_ZONES];
 	int nzones;
 	struct show charging, full;
+	int sleep;		/* effective table colour or SLEEP_KEEP */
+	bool sleep_explicit, custom_table;
+	char sleep_choice[NAME_LEN]; /* explicit requested name, even if absent */
 	int notify, notify_on, notify_off;	/* notify -1: none */
 	bool raw;
 	u8 raw_states[MAX_PINS];
@@ -103,6 +119,7 @@ struct status_led {
 	int zone;		/* -1 until the first battery reading */
 	bool battery_seen;
 	int capacity, status;
+	bool plugged;		/* latest battery/charger policy evaluation */
 	struct show base;	/* what mode/battery/charger want */
 	const char *why;
 	int phase;
@@ -281,6 +298,12 @@ static void evaluate(struct status_led *led)
 		  led->status == POWER_SUPPLY_STATUS_FULL ||
 		  led->status == POWER_SUPPLY_STATUS_NOT_CHARGING;
 
+	/* RK817 reports FULL at 100% even after unplugging. For the sleep
+	 * exception use actual ONLINE supplies, not FULL alone. Keep the
+	 * existing awake charging/full selection below unchanged. */
+	led->plugged = power_supply_is_system_supplied() > 0 ||
+		       led->status == POWER_SUPPLY_STATUS_CHARGING ||
+		       led->status == POWER_SUPPLY_STATUS_NOT_CHARGING;
 	if (have_battery)
 		led->battery_seen = true;
 	if (have_battery && led->battery_mode)
@@ -315,6 +338,17 @@ static void evaluate(struct status_led *led)
 	apply(led);
 }
 
+/* Called under lock. Charger and notification keep their normal precedence;
+ * raw Settings colour checks also remain the strongest override in apply().
+ */
+static bool sleep_active(struct status_led *led)
+{
+	return led->suspended && led->sleep != SLEEP_KEEP && !led->plugged &&
+	       (led->battery_mode ||
+		(led->mode.a != RELEASE &&
+		 (led->mode.a != 0 || led->mode.b != 0)));
+}
+
 /* put the right colour on the pins and start or stop blinking */
 static void apply(struct status_led *led)
 {
@@ -335,6 +369,8 @@ static void apply(struct status_led *led)
 		c = !led->phase ? led->notify :
 		    led->base.a != led->notify ? led->base.a : 0;
 		delay = led->phase ? led->notify_off : led->notify_on;
+	} else if (sleep_active(led)) {
+		c = led->sleep;
 	} else if (led->base.a != led->base.b && !led->suspended) {
 		c = led->phase ? led->base.b : led->base.a;
 		delay = BLINK_MS;
@@ -572,6 +608,84 @@ static ssize_t full_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RW(full);
 
+static ssize_t sleep_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	struct status_led *led = dev_get_drvdata(dev);
+	int n;
+
+	mutex_lock(&led->lock);
+	n = sprintf(buf, "%s\n", led->sleep == SLEEP_KEEP ?
+		    "keep" : led->names[led->sleep]);
+	mutex_unlock(&led->lock);
+	return n;
+}
+
+/* Locked. "off" is the tester's observed-dark label (ColorCheck.finish),
+ * not an inference from floating GPIOs: a genuine R36S can remain green with
+ * every pin released. A replacement table is new board evidence.
+ */
+static int default_sleep(struct status_led *led)
+{
+	const char *s;
+	int c;
+
+	c = find_color(led, "off", 3);
+	if (led->custom_table && c >= 0)
+		return c;
+	s = dt_value(led, "sleep", "default", led->names[c >= 0 ? c : 0]);
+	if (!strcmp(s, "keep"))
+		return SLEEP_KEEP;
+	c = find_color(led, s, strlen(s));
+	return c >= 0 ? c : 0;
+}
+
+static ssize_t sleep_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct status_led *led = dev_get_drvdata(dev);
+	bool use_default = sysfs_streq(buf, "default");
+	size_t len;
+	int c;
+
+	mutex_lock(&led->lock);
+	if (use_default) {
+		c = default_sleep(led);
+		led->sleep_explicit = false;
+		led->sleep_choice[0] = 0;
+	} else {
+		len = strlen(buf);
+		while (len && isspace(buf[len - 1]))
+			len--;
+		if (len == 4 && !strncmp(buf, "keep", 4))
+			c = SLEEP_KEEP;
+		else
+			c = find_color(led, buf, len);
+		if ((c < 0 && c != SLEEP_KEEP) || len >= NAME_LEN) {
+			mutex_unlock(&led->lock);
+			return -EINVAL;
+		}
+		memcpy(led->sleep_choice, buf, len);
+		led->sleep_choice[len] = 0;
+		led->sleep_explicit = true;
+	}
+	led->sleep = c;
+	apply(led);
+	mutex_unlock(&led->lock);
+	return count;
+}
+static DEVICE_ATTR_RW(sleep);
+
+/* A customized colour table changes indices. Preserve the setting by name,
+ * not by numeric slot; a deleted colour falls back to the new rest colour.
+ */
+static void remap_sleep(struct status_led *led, const char *name, bool keep)
+{
+	int c = keep ? SLEEP_KEEP : find_color(led, name, strlen(name));
+
+	led->sleep = c >= 0 || c == SLEEP_KEEP ? c : 0;
+}
+
 static ssize_t notify_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
 {
@@ -678,6 +792,9 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 		n = sprintf(buf, "raw\n");
 	else if (led->notify >= 0)
 		n = sprintf(buf, "notify %s\n", led->names[led->notify]);
+	else if (sleep_active(led))
+		n = sprintf(buf, "%s sleep %d%%\n", led->names[led->sleep],
+			    led->capacity);
 	else {
 		n = print_show(led, &led->base, buf);
 		n += sprintf(buf + n, " %s %d%%\n", led->why, led->capacity);
@@ -749,6 +866,9 @@ static void builtin_settings(struct status_led *led)
 	led->nzones = 1;
 	led->zone = -1;
 	led->notify = -1;
+	led->sleep = 0;
+	led->sleep_explicit = false;
+	led->sleep_choice[0] = 0;
 }
 
 static ssize_t table_store(struct device *dev, struct device_attribute *attr,
@@ -757,6 +877,8 @@ static ssize_t table_store(struct device *dev, struct device_attribute *attr,
 	struct status_led *led = dev_get_drvdata(dev);
 	char names[MAX_COLORS][NAME_LEN];
 	u8 states[MAX_COLORS][MAX_PINS];
+	char sleep_name[NAME_LEN];
+	bool sleep_keep, sleep_explicit;
 	int n = 0, ret = 0;
 
 	if (strncmp(buf, "default", 7)) {
@@ -765,14 +887,26 @@ static ssize_t table_store(struct device *dev, struct device_attribute *attr,
 			return n;
 	}
 	mutex_lock(&led->lock);
+	sleep_explicit = led->sleep_explicit;
+	strscpy(sleep_name, led->sleep_choice, NAME_LEN);
+	sleep_keep = !strcmp(sleep_name, "keep");
 	if (n) {
 		memcpy(led->names, names, sizeof(names));
 		memcpy(led->states, states, sizeof(states));
 		led->ncolors = n;
+		led->custom_table = true;
 	} else {
 		ret = load_dt_table(led);
+		led->custom_table = false;
 	}
 	builtin_settings(led);
+	if (n && sleep_explicit) {
+		led->sleep_explicit = true;
+		strscpy(led->sleep_choice, sleep_name, NAME_LEN);
+		remap_sleep(led, sleep_name, sleep_keep);
+	} else {
+		led->sleep = default_sleep(led);
+	}
 	led->base.a = led->base.b = RELEASE;
 	led->why = "waiting for the battery";
 	led->shown = -1;
@@ -793,6 +927,7 @@ static struct attribute *status_led_attrs[] = {
 	&dev_attr_battery.attr,
 	&dev_attr_charging.attr,
 	&dev_attr_full.attr,
+	&dev_attr_sleep.attr,
 	&dev_attr_notify.attr,
 	&dev_attr_raw.attr,
 	&dev_attr_state.attr,
@@ -840,6 +975,13 @@ static int load_dt_settings(struct status_led *led)
 	bad |= charging_store(dev, NULL, "default", 7) < 0;
 	bad |= full_store(dev, NULL, "default", 7) < 0;
 	bad |= mode_store(dev, NULL, "default", 7) < 0;
+	/* Do not erase an explicit write which arrived while other settings
+	 * were being restored. Table swap/remapping was already atomic. */
+	mutex_lock(&led->lock);
+	if (!led->sleep_explicit)
+		led->sleep = default_sleep(led);
+	apply(led);
+	mutex_unlock(&led->lock);
 	return bad ? -EINVAL : 0;
 }
 
@@ -910,7 +1052,8 @@ static int status_led_suspend(struct device *dev)
 	mutex_lock(&led->lock);
 	led->suspended = true;
 	led->phase = 0;
-	apply(led);
+	/* Settle charger changes even if the queued update was cancelled. */
+	evaluate(led);
 	mutex_unlock(&led->lock);
 	cancel_delayed_work_sync(&led->blink);
 	return 0;
