@@ -1539,3 +1539,10 @@ static void __exit cfg80211_exit(void)
 	destroy_workqueue(cfg80211_wq);
 }
 module_exit(cfg80211_exit);
+
+void cfg80211_block_resume_requests(struct wiphy *wiphy, bool blocked)
+{
+	ASSERT_RTNL();
+	WRITE_ONCE(wiphy_to_rdev(wiphy)->resume_requests_blocked, blocked);
+}
+EXPORT_SYMBOL_GPL(cfg80211_block_resume_requests);

@@ -74,11 +74,11 @@ check_all_cmd_done:
 }
 
 /*
- * Wake the firmware on resume. During a real system resume (during_pm_resume)
- * the M0 did not survive deep sleep, so this SDIO write times out and kicks the
- * fw recovery (power-cycle + re-download). Doing that while dpm_resume is still
- * running races the SoC clock/regulator restore and hard-hangs the Ultra. Defer
- * it to the PM_POST_SUSPEND notifier, which runs once resume has completed.
+ * Legacy WoWLAN-only wake replay. A request deferred from DPM is replayed in
+ * PM_POST_SUSPEND. This does not prove a clock-restore race or retained M0
+ * readiness: captures show both immediate errors and long ACK polls after the
+ * SDIO host has resumed. Checked cold-stop mode uses ordinary MAC reconfig in
+ * a separate post-thaw worker and never enters this retention path.
  */
 static void rk915_resume_wake(struct hal_priv *priv)
 {
@@ -201,6 +201,10 @@ int img_suspend(struct ieee80211_hw *hw,
 	priv = (struct img_priv *)hw->priv;
 
 	RPU_INFO_UMACIF("%s: Suspend starting\n", __func__);
+	if (READ_ONCE(pm_checked_resume)) {
+		RPU_ERROR_UMACIF("checked PM trial supports ordinary stop/start, not WoWLAN\n");
+		return -EOPNOTSUPP;
+	}
 
 	/* If not associated, just notify firmware to sleep */
 	if (!priv->params->is_associated) {

@@ -505,6 +505,12 @@ struct device_node;
 
 struct mmc_host *mmc_alloc_host(int extra, struct device *);
 struct mmc_host *devm_mmc_alloc_host(struct device *dev, int extra);
+/* Returned host has a class-device reference; put_device(&host->class_dev). */
+extern struct mmc_host *mmc_get_rk915_host(void);
+/* Existing exported host-claim primitives, also used by SDIO bootstrap. */
+extern int __mmc_claim_host(struct mmc_host *host, struct mmc_ctx *ctx,
+			    atomic_t *abort);
+extern void mmc_release_host(struct mmc_host *host);
 int mmc_add_host(struct mmc_host *);
 void mmc_remove_host(struct mmc_host *);
 void mmc_free_host(struct mmc_host *);

@@ -274,6 +274,9 @@ struct mmc_card {
 #define MMC_QUIRK_TRIM_BROKEN	(1<<12)		/* Skip trim */
 #define MMC_QUIRK_BROKEN_HPI	(1<<13)		/* Disable broken HPI support */
 #define MMC_QUIRK_BROKEN_SD_DISCARD	(1<<14)	/* Disable broken SD discard support */
+/* Dynamic, host-claim protected: an RK915 driver owns a checked cold reset.
+ * Suppress electrical presence tests, not administrative removal/unbind. */
+#define MMC_QUIRK_RK915_COLD_RESET	(1<<15)
 
 	bool			reenable_cmdq;	/* Re-enable Command Queue */
 

@@ -4433,6 +4433,28 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw);
 void ieee80211_free_hw(struct ieee80211_hw *hw);
 
 /**
+ * ieee80211_enable_deferred_resume - opt in to a cold restart after task thaw
+ * @hw: hardware allocated but not yet registered
+ *
+ * Only for drivers which stop all hardware on ordinary system suspend and
+ * establish full readiness in start(). Does not support WoWLAN. Resume keeps
+ * the registered interfaces and queues suspended until a PM_POST_SUSPEND
+ * worker completes the normal MAC reconfiguration. Other drivers are unchanged.
+ * Return: zero or a PM-notifier registration error.
+ */
+#ifdef CONFIG_PM
+int ieee80211_enable_deferred_resume(struct ieee80211_hw *hw);
+int ieee80211_set_deferred_resume(struct ieee80211_hw *hw, bool enabled);
+#else
+static inline int ieee80211_set_deferred_resume(struct ieee80211_hw *hw, bool enabled)
+{ return -EOPNOTSUPP; }
+static inline int ieee80211_enable_deferred_resume(struct ieee80211_hw *hw)
+{
+	return -EOPNOTSUPP;
+}
+#endif
+
+/**
  * ieee80211_restart_hw - restart hardware completely
  *
  * Call this function when the hardware was restarted for some reason

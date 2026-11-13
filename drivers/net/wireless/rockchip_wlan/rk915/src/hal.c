@@ -563,23 +563,31 @@ static int save_fw_recovery_cmd(void *cmd)
 static void cmd_send(u8 *cmd, int len)
 {
 	struct sk_buff *cmd_skb;
+	int ret;
 
-	/* the address of cmd should 4bytes aligned */
-	cmd_skb = alloc_skb(len, GFP_ATOMIC);
-	if (cmd_skb) {
-		hpriv->fw_error_cmd_done = 0;
-		
-		memcpy(skb_put(cmd_skb, len), cmd, len);
-		rk915_data_write(hpriv, 0, (void *)cmd_skb->data, len);
-		dev_kfree_skb_any(cmd_skb);
-
-		wait_for_fw_error_cmd_done(NULL);
+	if (hpriv->recovery_error)
+		return;
+	cmd_skb = alloc_skb(len, GFP_KERNEL);
+	if (!cmd_skb) {
+		hpriv->recovery_error = -ENOMEM;
+		return;
 	}
+	WRITE_ONCE(hpriv->fw_error_cmd_done, 0);
+	memcpy(skb_put(cmd_skb, len), cmd, len);
+	ret = rk915_data_write(hpriv, 0, cmd_skb->data, len);
+	dev_kfree_skb_any(cmd_skb);
+	if (!ret && wait_for_fw_error_cmd_done(NULL))
+		ret = -ETIMEDOUT;
+	if (ret)
+		hpriv->recovery_error = ret;
 }
 
-static void send_fw_recovery_cmd(void)
+static int send_fw_recovery_cmd(void)
 {
 	u32 vif_index;
+	unsigned long deadline;
+
+	hpriv->recovery_error = 0;
 
 	/* Re-set parameters */
 	if(g_lpw_recovery_param.flag & CMD_RESET_BIT)
@@ -589,20 +597,20 @@ static void send_fw_recovery_cmd(void)
 		g_lpw_recovery_param.status = RECOVERY_STATUS_WAIT_RESET_COMP;
 		cmd_send((u8 *)&g_lpw_recovery_param.reset_param, sizeof(struct cmd_reset));
 
-		//Wait for RESET COMPLETE
-		while(1)
-		{
-			//RPU_DEBUG_ROCOVERY("wait reset complet %d\n", g_lpw_recovery_param.status);
-			if(g_lpw_recovery_param.status == RECOVERY_STATUS_RESET_COMP)
-			{	
-				break;
-			}
-			msleep(50);
+		if (hpriv->recovery_error)
+			return hpriv->recovery_error;
+		deadline = jiffies + msecs_to_jiffies(2000);
+		while (READ_ONCE(g_lpw_recovery_param.status) != RECOVERY_STATUS_RESET_COMP) {
+			if (READ_ONCE(hpriv->shutdown))
+				return -ESHUTDOWN;
+			if (time_after_eq(jiffies, deadline))
+				return -ETIMEDOUT;
+			msleep(20);
 		}
 
 		if (hpriv->fw_error_reason == FW_ERR_RESET_CMD ||
 			g_lpw_recovery_param.reset_param.type == LMAC_DISABLE) {
-			return;
+			return hpriv->recovery_error;
 		}
 		
 		//TX POWER
@@ -691,15 +699,26 @@ static void send_fw_recovery_cmd(void)
 			cmd_send((u8 *)&g_lpw_recovery_param.mcst_fltr_ctrl_param, sizeof(struct cmd_mcst_filter_ctrl));
 		}
 	}    
+	return hpriv->recovery_error;
 }
 
 extern void rpu_process_pending_operates(void);
 static void fw_err_work_fn(struct work_struct *work)
 {
+	int ret = -ESHUTDOWN;
 	RPU_DEBUG_ROCOVERY("%s\n", __func__);
 
 	if (hpriv->shutdown)
-		goto unlock_out;
+		goto failed;
+	/* A normal MAC resume owns its one cold initialization, not saved replay. */
+	if (READ_ONCE(hpriv->pm_need_cold)) {
+		ret = -ECANCELED;
+		goto failed;
+	}
+	WRITE_ONCE(hpriv->recovery_io_ready, false);
+	ret = rk915_pm_quiesce(hpriv, false);
+	if (ret)
+		goto failed;
 
 	// clear pending rx_serias info 
 	hpriv->io_info->rx_serias_count = 0;
@@ -711,16 +730,25 @@ static void fw_err_work_fn(struct work_struct *work)
 
 	// 1. reset rk915
 	RPU_DEBUG_ROCOVERY("reset\n");
-	hpriv->fw_tear_down_func((void *)hpriv);
+	ret = hpriv->fw_tear_down_func(hpriv);
+	if (ret)
+		goto failed;
 	hpriv->hal_disabled = 1;
-	hpriv->fw_bring_up_func((void *)hpriv);
+	ret = hpriv->fw_bring_up_func(hpriv);
+	if (ret)
+		goto failed;
 
 	// 2. recovery cmds
 	RPU_DEBUG_ROCOVERY("recovery cmds\n");
+	WRITE_ONCE(hpriv->recovery_io_ready, true);
 	hpriv->hal_disabled = 0;
-	send_fw_recovery_cmd();
+	rk915_pm_unquiesce(hpriv);
+	ret = send_fw_recovery_cmd();
+	if (ret)
+		goto failed;
 
 	hpriv->fw_error_processing = 0;
+	WRITE_ONCE(hpriv->recovery_io_ready, false);
 	hpriv->fw_error = 0;
 
 	if (hpriv->fw_error_reason != FW_ERR_RESET_CMD) {
@@ -731,10 +759,18 @@ static void fw_err_work_fn(struct work_struct *work)
 
 	// 4. restore pending command in fw error.
 	RPU_DEBUG_ROCOVERY("restore pending command\n");
-	rpu_process_pending_operates();
+	/* The checked PM path never manufactures MAC/reset completions. */
+	if (!READ_ONCE(pm_checked_resume))
+		rpu_process_pending_operates();
 
 	RPU_ERROR_ROCOVERY("-------- fw error recovery end --------\n");
-
+	goto unlock_out;
+failed:
+	WRITE_ONCE(hpriv->recovery_io_ready, false);
+	WRITE_ONCE(hpriv->hal_disabled, 1);
+	WRITE_ONCE(hpriv->fw_error, 1);
+	WRITE_ONCE(hpriv->fw_error_processing, 0);
+	RPU_ERROR_ROCOVERY("checked recovery failed, firmware stays unavailable: %d\n", ret);
 unlock_out:
 	if (wake_lock_active(&hpriv->fw_err_lock))
 		wake_unlock(&hpriv->fw_err_lock);
@@ -757,6 +793,7 @@ static void tx_work_fn(struct work_struct *work)
 	struct sk_buff *skb;
 	unsigned long start = 0;
 	int ret;
+	u32 generation = 0;
 #ifdef TX_SG_MODE
 	struct cmd_tx_ctrl *tx_cmd;
 	unsigned int pkt = 0;
@@ -800,7 +837,8 @@ static void tx_work_fn(struct work_struct *work)
     			break;
     		}
 
-    		skb = skb_dequeue(&priv->txq);
+    		generation = READ_ONCE(priv->fw_generation);
+		skb = skb_dequeue(&priv->txq);
     		if (skb == NULL)
     			break;
 
@@ -842,7 +880,8 @@ static void tx_work_fn(struct work_struct *work)
 
     		/* workaround m0 died problem during resume */
     		phdr = (struct host_rpu_msg_hdr *)skb->data;
-    		if (phdr->id != RPU_CMD_RESET && phdr->id != RPU_CMD_PS_ECON_CFG) {
+    		if (phdr->id != RPU_CMD_RESET && phdr->id != RPU_CMD_PS_ECON_CFG &&
+		    !READ_ONCE(priv->pm_transport_ready)) {
     			imgpriv = wifi ? wifi->hw->priv:NULL;
     			wait_for_pm_resume_done(imgpriv);
             }
@@ -852,7 +891,6 @@ static void tx_work_fn(struct work_struct *work)
     		RPU_INFO_HAL("send %s(%d)\n", cmd_str, phdr->id);
 #endif
 
-    		save_fw_recovery_cmd(skb->data);
 
     		if (priv->hal_disabled) {
     			dev_kfree_skb_any(skb);
@@ -864,7 +902,15 @@ static void tx_work_fn(struct work_struct *work)
     		  * when transmit tx cmd and continues tx data, it can't be interrupt by rx 
     		  */
     		mutex_lock(&priv->txrx_mutex);
+		if (generation != READ_ONCE(priv->fw_generation) ||
+		    READ_ONCE(priv->hal_disabled) || READ_ONCE(priv->pm_io_quiesced) ||
+		    READ_ONCE(priv->fw_error_processing)) {
+			mutex_unlock(&priv->txrx_mutex);
+			dev_kfree_skb_any(skb);
+			continue;
+		}
 #endif
+		save_fw_recovery_cmd(skb->data);
 
 #ifndef TX_SG_MODE
     {
@@ -1188,6 +1234,9 @@ static int rx_thread(void *data)
 #ifdef TXRX_DATA_LOCK
 //		mutex_lock(&priv->txrx_mutex);
 #endif
+		mutex_lock(&priv->rx_io_mutex);
+		if (READ_ONCE(priv->pm_io_quiesced))
+			goto rx_io_unlock;
 		data_length = rk915_serias_read(priv, 0, priv->io_info->rx_serias_buf,
 									  0, MAX_RX_SERIAS_BYTES);
 #ifdef TXRX_DATA_LOCK
@@ -1198,7 +1247,7 @@ static int rx_thread(void *data)
 				RPU_ERROR_HAL("%s: error datalen: %x.\n", __func__, data_length);
 			priv->io_info->rx_serias_count = 0;
 			priv->io_info->rx_next_len = 0;
-			continue;
+			goto rx_io_unlock;
 		}
 		rx_counts_one += data_length;
 
@@ -1209,7 +1258,7 @@ static int rx_thread(void *data)
 		} else {
 			alloc_skb_failures++;
 			RPU_ERROR_HAL("%s: alloc_skb %d failed\n", __func__, data_length);
-			continue;
+			goto rx_io_unlock;
 		}
 		
 		nbuff = rx_skb->data;
@@ -1242,7 +1291,7 @@ static int rx_thread(void *data)
 					RPU_ERROR_HAL(" payload_len: %d len:%d\n",
 						payload_length,
 						length);
-					continue;				
+					goto rx_io_unlock;				
 				}
 		} else	{
 			//RPU_INFO_HAL("receive %d\n", event);
@@ -1257,13 +1306,15 @@ static int rx_thread(void *data)
 
 		if (hpriv->fw_error_processing) {
 			RPU_DEBUG_ROCOVERY("event %d\n", event);
-			hpriv->fw_error_cmd_done = 1;
+			if (event == RPU_EVENT_COMMAND_PROC_DONE ||
+			    event == RPU_EVENT_RESET_COMPLETE)
+				WRITE_ONCE(hpriv->fw_error_cmd_done, 1);
 			if (event == RPU_EVENT_RESET_COMPLETE &&
 				hdr->length == sizeof(struct host_event_reset_complete)) {
 				g_lpw_recovery_param.status = RECOVERY_STATUS_RESET_COMP;
 			}
 			dev_kfree_skb_any(rx_skb);
-			continue;
+			goto rx_io_unlock;
 		}
 
 		/*
@@ -1284,6 +1335,8 @@ static int rx_thread(void *data)
 #else
 		priv->rcv_handler(rx_skb);
 #endif
+rx_io_unlock:
+		mutex_unlock(&priv->rx_io_mutex);
 	}
 	complete_and_exit(&tsk->completed, 0);
 	RPU_INFO_HAL("%s exit\n", __func__);
@@ -1448,11 +1501,50 @@ static int hal_proc_init(struct proc_dir_entry *hal_proc_dir_entry)
 
 
 
+/* start() calls with no priv->mutex held: RX callbacks may need that mutex.
+ * A recovery worker uses flush_rx=false and refuses a busy callback instead of
+ * waiting for a caller which may itself be waiting for firmware recovery.
+ */
+int rk915_pm_quiesce(struct hal_priv *priv, bool flush_rx)
+{
+	WRITE_ONCE(priv->hal_disabled, 1);
+	if (priv->io_info->irq_request && !priv->pm_irq_masked) {
+		disable_irq(priv->io_info->irq);
+		priv->pm_irq_masked = true;
+	}
+	mutex_lock(&priv->rx_io_mutex);
+	WRITE_ONCE(priv->pm_io_quiesced, true);
+	priv->io_info->rx_serias_count = 0;
+	priv->io_info->rx_next_len = 0;
+	mutex_unlock(&priv->rx_io_mutex);
+#if ENABLE_RX_WORKQ
+	if (flush_rx)
+		flush_work(&priv->rx_work);
+	else if (work_busy(&priv->rx_work))
+		return -EBUSY;
+#endif
+	mutex_lock(&priv->txrx_mutex);
+	priv->fw_generation++;
+	if (READ_ONCE(priv->pm_need_cold))
+		skb_queue_purge(&priv->txq);
+	mutex_unlock(&priv->txrx_mutex);
+	return 0;
+}
+
+void rk915_pm_unquiesce(struct hal_priv *priv)
+{
+	WRITE_ONCE(priv->pm_io_quiesced, false);
+	if (priv->pm_irq_masked) {
+		priv->pm_irq_masked = false;
+		enable_irq(priv->io_info->irq);
+	}
+}
+
 int hal_start(void)
 {
-	hpriv->hal_disabled = 0;
-
 	init_fw_recovery_cmd();
+	hpriv->hal_disabled = 0;
+	rk915_pm_unquiesce(hpriv);
 
 	/* Enable host_int and rpu_int */
 	hal_enable_int();
@@ -1480,6 +1572,8 @@ static int rk915_pm_notifier(struct notifier_block *nb, unsigned long action,
 			 * The actual suspend will be handled by wifi driver suspend callback.
 			 */
 			RPU_INFO_HAL("%s: PM_SUSPEND_PREPARE\n", __func__);
+			if (READ_ONCE(pm_checked_resume))
+				WRITE_ONCE(hpriv->pm_system_suspend, true);
 			break;
 
 		case PM_POST_SUSPEND:
@@ -1487,8 +1581,9 @@ static int rk915_pm_notifier(struct notifier_block *nb, unsigned long action,
 			 * Clear the resume flag to allow normal operation.
 			 */
 			RPU_INFO_HAL("%s: PM_POST_SUSPEND\n", __func__);
+			WRITE_ONCE(hpriv->pm_system_suspend, false);
 			hpriv->during_pm_resume = 0;
-			if (hpriv->defer_resume_wake) {
+			if (hpriv->defer_resume_wake && !READ_ONCE(pm_checked_resume)) {
 				hpriv->defer_resume_wake = 0;
 				/* resume is done, clocks are stable: safe to wake
 				 * (and recover) the fw without racing the SoC. */
@@ -1505,7 +1600,7 @@ static int rk915_pm_notifier(struct notifier_block *nb, unsigned long action,
 			/* System has restored from hibernate */
 			RPU_INFO_HAL("%s: PM_POST_RESTORE\n", __func__);
 			hpriv->during_pm_resume = 0;
-			if (hpriv->defer_resume_wake) {
+			if (hpriv->defer_resume_wake && !READ_ONCE(pm_checked_resume)) {
 				hpriv->defer_resume_wake = 0;
 				rk915_notify_pm(hpriv, 1);
 			}

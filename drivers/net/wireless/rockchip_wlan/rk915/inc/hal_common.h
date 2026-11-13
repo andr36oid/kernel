@@ -184,18 +184,26 @@ struct hal_priv {
 	int fw_error_reason;
 	int lpw_error_counter;
 	int fw_error_cmd_done;
+	int recovery_error;
+	bool recovery_io_ready;
 	struct wake_lock fw_err_lock;
 	int during_fw_download;
 	int shutdown;
 
+	/* Last checked PM transaction result, consumed by SDIO suspend. */
+	int pm_notify_error;
+	struct mutex fw_mutex;
+	struct mutex rx_io_mutex;
+	bool pm_system_suspend;
+	bool pm_need_cold;
+	bool pm_fresh_ready;
+	bool pm_transport_ready;
+	bool pm_fail_closed;
+	bool pm_io_quiesced;
+	bool pm_irq_masked;
+	u32 fw_generation;
 	int during_pm_resume;
-	/*
-	 * Set when a mac80211 resume landed while the system was still inside
-	 * dpm_resume: poking the (deep-sleep-dead) M0 over SDIO there races the
-	 * SoC's own clock/regulator restore and hard-hangs the whole SoC on the
-	 * Ultra (rk915 SDIO). The wake is replayed from the PM_POST_SUSPEND
-	 * notifier instead, once resume has fully completed and clocks are stable.
-	 */
+	/* Legacy WoWLAN-only wake replay. Ordinary cold-stop mode never uses it. */
 	int defer_resume_wake;
 	struct notifier_block pm_notifier;
 };

@@ -39,6 +39,9 @@ void ieee80211_configure_filter(struct ieee80211_local *local)
 	unsigned int changed_flags;
 	unsigned int new_flags = 0;
 
+	if (ieee80211_resume_blocked(local))
+		return;
+
 	if (atomic_read(&local->iff_allmultis))
 		new_flags |= FIF_ALLMULTI;
 
@@ -301,6 +304,10 @@ static void ieee80211_restart_work(struct work_struct *work)
 void ieee80211_restart_hw(struct ieee80211_hw *hw)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
+
+	if (local->resume_cycle_deferred &&
+	    (READ_ONCE(local->suspended) || READ_ONCE(local->resume_pending)))
+		return; /* The one normal resume reconfiguration owns this restart. */
 
 	trace_api_restart_hw(local);
 
@@ -1364,6 +1371,8 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
 
+	ieee80211_disable_deferred_resume(local);
+
 	tasklet_kill(&local->tx_pending_tasklet);
 	tasklet_kill(&local->tasklet);
 
@@ -1420,6 +1429,8 @@ void ieee80211_free_hw(struct ieee80211_hw *hw)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
 	enum nl80211_band band;
+
+	ieee80211_disable_deferred_resume(local);
 
 	mutex_destroy(&local->iflist_mtx);
 	mutex_destroy(&local->mtx);

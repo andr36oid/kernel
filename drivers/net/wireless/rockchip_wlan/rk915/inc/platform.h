@@ -2,7 +2,7 @@
 #define __RK915_PLATFORM_H_
 
 void rk915_poweroff(void);
-void rk915_poweron(void);
+int rk915_poweron(void);
 void rk915_rescan_card(unsigned insert);
 int rk915_platform_bus_init(struct host_io_info *phost);
 int rk915_platform_bus_rec_init(struct host_io_info *phost);

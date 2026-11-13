@@ -27,24 +27,43 @@ void rk915_unlock(struct hal_priv *priv)
 
 int rk915_io_reset(struct hal_priv *priv)
 {
-	if (priv->during_fw_download)
+	/* The serialized cold start owns reset; do not enter the legacy
+	 * two-second I/O-reset/replay path on an error in that transaction. */
+	if (priv->during_fw_download || READ_ONCE(priv->pm_fail_closed))
 		return 0;
 	priv->io_info->io_ops->io_reset(priv->io_info);
 	return 0;
 }
 
-void rk915_notify_pm(struct hal_priv *priv, int wakeup)
+int rk915_notify_pm(struct hal_priv *priv, int wakeup)
 {
-	if (priv->io_info->io_ops->io_notify_pm) {
-		if (!wakeup && rk915_wait_fw_ready_to_sleep()) {
-			rk915_lock(priv);
-			priv->io_info->io_ops->io_notify_pm(priv->io_info, wakeup);
-			rk915_unlock(priv);
-		}
-		rk915_lock(priv);
-		priv->io_info->io_ops->io_notify_pm(priv->io_info, wakeup);
-		rk915_unlock(priv);
+	int ret = 0;
+	int twice;
+
+	if (!priv->io_info->io_ops->io_notify_pm)
+		return 0;
+
+	/* Preserve the vendor CSR-selected transaction count; check EACH ACK. */
+	twice = !wakeup ? rk915_wait_fw_ready_to_sleep() : 0;
+	if (twice < 0) {
+		ret = twice;
+		goto out;
 	}
+	if (twice) {
+		rk915_lock(priv);
+		ret = priv->io_info->io_ops->io_notify_pm(priv->io_info, wakeup);
+		rk915_unlock(priv);
+		if (ret)
+			goto out;
+	}
+	rk915_lock(priv);
+	ret = priv->io_info->io_ops->io_notify_pm(priv->io_info, wakeup);
+	rk915_unlock(priv);
+out:
+	WRITE_ONCE(priv->pm_notify_error, ret);
+	if (ret)
+		RPU_ERROR_SDIO("checked PM %s failed: %d\n", wakeup ? "wake" : "sleep", ret);
+	return ret;
 }
 
 int rk915_writeb(struct hal_priv *priv, unsigned int addr, int val)
@@ -53,7 +72,8 @@ int rk915_writeb(struct hal_priv *priv, unsigned int addr, int val)
 
 	rk915_lock(priv);
 	ret = priv->io_info->io_ops->io_writeb(priv->io_info, addr, val);
-	priv->io_info->io_ops->io_writeb_comp(priv->io_info);
+	if (!ret)
+		ret = priv->io_info->io_ops->io_writeb_comp(priv->io_info);
 	if (ret < 0)
 		rk915_io_reset(priv);
 	rk915_unlock(priv);
@@ -175,7 +195,8 @@ static int rk915_notify(struct hal_priv *priv)
 	int ret;
 
 	ret = priv->io_info->io_ops->io_writeb(priv->io_info, IO_NOTIFY_ADDR, IO_NOTIFY_VAL);
-	priv->io_info->io_ops->io_writeb_comp(priv->io_info);
+	if (!ret)
+		ret = priv->io_info->io_ops->io_writeb_comp(priv->io_info);
 	return ret;
 }
 

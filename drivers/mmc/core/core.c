@@ -2200,6 +2200,8 @@ int _mmc_detect_card_removed(struct mmc_host *host)
 
 	if (!host->card || mmc_card_removed(host->card))
 		return 1;
+	if (host->card->quirks & MMC_QUIRK_RK915_COLD_RESET)
+		return 0;
 
 	ret = host->bus_ops->alive(host);
 

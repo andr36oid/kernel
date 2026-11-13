@@ -5147,6 +5147,10 @@ static inline const char *wiphy_name(const struct wiphy *wiphy)
 	return dev_name(&wiphy->dev);
 }
 
+/* Deferred-resume MACs keep their interfaces registered but unavailable until
+ * hardware reconfiguration finishes. Call under RTNL, never from an IRQ. */
+void cfg80211_block_resume_requests(struct wiphy *wiphy, bool blocked);
+
 /**
  * wiphy_new_nm - create a new wiphy for use with cfg80211
  *

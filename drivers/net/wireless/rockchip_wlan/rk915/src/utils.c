@@ -193,6 +193,8 @@ check_reset_complete:
 	if (!priv->reset_complete) {
 		RPU_ERROR_MAIN("%s-UMAC: No reset complete after %d ticks\n",
 			   priv->name, timeout);
+		if (READ_ONCE(hpriv->pm_fail_closed))
+			return -ETIMEDOUT;
 		rk915_signal_io_error(FW_ERR_RESET_CMD);
 		wait_for_fw_error_cmd_done(priv);
 		return -1;

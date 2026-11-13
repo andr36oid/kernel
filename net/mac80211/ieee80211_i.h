@@ -1229,6 +1229,7 @@ struct ieee80211_local {
 	 */
 	bool suspended;
 
+
 	/*
 	 * Resuming is true while suspended, but when we're reprogramming the
 	 * hardware -- at that time it's allowed to use ieee80211_queue_work()
@@ -1449,6 +1450,18 @@ struct ieee80211_local {
 	/* TDLS channel switch */
 	struct work_struct tdls_chsw_work;
 	struct sk_buff_head skb_queue_tdls_chsw;
+
+	/* Opt-in only; transitions serialized by resume_lock, never wait in PM. */
+	bool defer_system_resume;
+	bool resume_pending;
+	bool resume_running;
+	bool resume_stopping;
+	bool resume_preparing;
+	spinlock_t resume_lock;
+	struct work_struct resume_work;
+	struct notifier_block resume_notifier;
+	bool defer_resume_enabled;
+	bool resume_cycle_deferred;
 };
 
 static inline struct ieee80211_sub_if_data *
@@ -1982,6 +1995,20 @@ void ieee80211_stop_device(struct ieee80211_local *local);
 int __ieee80211_suspend(struct ieee80211_hw *hw,
 			struct cfg80211_wowlan *wowlan);
 
+#ifdef CONFIG_PM
+void ieee80211_disable_deferred_resume(struct ieee80211_local *local);
+int ieee80211_defer_resume(struct ieee80211_local *local);
+#else
+static inline void ieee80211_disable_deferred_resume(struct ieee80211_local *local) {}
+static inline int ieee80211_defer_resume(struct ieee80211_local *local) { return -EOPNOTSUPP; }
+#endif
+
+static inline bool ieee80211_resume_blocked(struct ieee80211_local *local)
+{
+	return READ_ONCE(local->resume_cycle_deferred) &&
+	       READ_ONCE(local->suspended) && !READ_ONCE(local->resuming);
+}
+
 static inline int __ieee80211_resume(struct ieee80211_hw *hw)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
@@ -1991,7 +2018,9 @@ static inline int __ieee80211_resume(struct ieee80211_hw *hw)
 		"%s: resume with hardware scan still in progress\n",
 		wiphy_name(hw->wiphy));
 
-	return ieee80211_reconfig(hw_to_local(hw));
+	if (local->resume_cycle_deferred && local->suspended && !local->wowlan)
+		return ieee80211_defer_resume(local);
+	return ieee80211_reconfig(local);
 }
 
 /* utility functions/constants */

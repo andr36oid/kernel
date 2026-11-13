@@ -76,6 +76,8 @@ struct cfg80211_registered_device {
 	struct sk_buff *scan_msg;
 	struct list_head sched_scan_req_list;
 	time64_t suspend_at;
+	/* Set only by the opt-in deferred-resume MAC, under RTNL. */
+	bool resume_requests_blocked;
 	struct work_struct scan_done_wk;
 
 	struct genl_info *cur_cmd_info;

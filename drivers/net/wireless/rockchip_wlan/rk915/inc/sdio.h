@@ -1,6 +1,10 @@
 #ifndef IF_SDIO_H
 #define IF_SDIO_H
 
+int rk915_sdio_prepare_card(void);
+bool rk915_sdio_policy_lock(void);
+void rk915_sdio_policy_unlock(void);
+
 #define TX_MSG_CMD		1
 #define TX_MSG_PKT		2
 #define TX_MSG_PATCH		3

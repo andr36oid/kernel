@@ -659,7 +659,7 @@ static int rk915_download(struct hal_priv *priv)
 	while (1) {
 		state = rk915_readb(priv, IO_FW_STATE);
 		if (state < 0) {
-			ret = -1;
+			ret = state;
 			goto fail;
 		}
 #ifdef SDIO_TXRX_STABILITY_TEST
@@ -676,7 +676,7 @@ static int rk915_download(struct hal_priv *priv)
 	};
 	if (count > max_retry) {
 		RPU_INFO_FIRMWARE("%s: download firmware failed\n", __func__);
-		ret = -1;
+		ret = -ETIMEDOUT;
 		goto fail;
 	} else {
 		RPU_INFO_FIRMWARE("%s: download firmware success\n", __func__);
@@ -719,7 +719,7 @@ static int rk915_download(struct hal_priv *priv)
 	while (1) {
 		state = rk915_readb(priv, IO_FW_STATE);
 		if (state < 0) {
-			ret = -1;
+			ret = state;
 			goto fail;
 		}
 		if (state >= WAIT_PATCH2)
@@ -732,7 +732,7 @@ static int rk915_download(struct hal_priv *priv)
 	};
 	if (count > max_retry) {
 		RPU_INFO_FIRMWARE("%s: download patch failed\n", __func__);
-		ret = -1;
+		ret = -ETIMEDOUT;
 		goto fail;
 	} else {
 		RPU_INFO_FIRMWARE("%s: download patch success\n", __func__);
@@ -768,7 +768,7 @@ static int rk915_download(struct hal_priv *priv)
 	while (1) {
 		state = rk915_readb(priv, IO_FW_STATE);
 		if (state < 0) {
-			ret = -1;
+			ret = state;
 			goto fail;
 		}
 		if (state >= M0_READY)
@@ -781,7 +781,7 @@ static int rk915_download(struct hal_priv *priv)
 	};
 	if (count > max_retry) {
 		RPU_INFO_FIRMWARE("%s: download patch2 failed\n", __func__);
-		ret = -1;
+		ret = -ETIMEDOUT;
 		goto fail;
 	} else {
 		RPU_INFO_FIRMWARE("%s: download patch2 success\n", __func__);
@@ -899,7 +899,7 @@ int rk915_download_firmware_patch_only(struct hal_priv *priv)
 	};
 	if (count > max_retry) {
 		RPU_INFO_FIRMWARE("%s: download patch2 failed\n", __func__);
-		ret = -1;
+		ret = -ETIMEDOUT;
 		goto fail;
 	} else {
 		RPU_INFO_FIRMWARE("%s: download patch2 success\n", __func__);

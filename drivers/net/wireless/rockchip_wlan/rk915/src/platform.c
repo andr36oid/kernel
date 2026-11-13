@@ -1,4 +1,5 @@
 #include <linux/rfkill-wlan.h>
+#include <linux/delay.h>
 
 #include "core.h"
 #include "if_io.h"
@@ -11,11 +12,14 @@ void rk915_rescan_card(unsigned insert)
     rockchip_wifi_set_carddetect(insert);
 }
 
-void rk915_poweron(void)
+int rk915_poweron(void)
 {
-	rockchip_wifi_power(0);
-	mdelay(RK915_POWER_ON_DELAY_MS);
-	rockchip_wifi_power(1);
+	int ret = rockchip_wifi_power(0);
+
+	if (ret)
+		return ret;
+	msleep(RK915_POWER_ON_DELAY_MS);
+	return rockchip_wifi_power(1);
 }
 
 void rk915_poweroff(void)
@@ -57,6 +61,10 @@ int rk915_register_irq(struct host_io_info *host)
 int rk915_free_irq(struct host_io_info *host)
 {
 	if (host->irq_request) {
+		if (hpriv->pm_irq_masked) {
+			enable_irq(host->irq);
+			hpriv->pm_irq_masked = false;
+		}
 		devm_free_irq(host->dev, host->irq, hpriv);
 		host->irq_request = false;
 	}

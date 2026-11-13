@@ -128,7 +128,14 @@ int rpu_core_init(struct img_priv *priv, unsigned int ftm)
 
 #ifndef SDIO_TXRX_STABILITY_TEST
 	/* notify fw wakeup */
-	rk915_notify_pm(hpriv, 1);
+	if (READ_ONCE(hpriv->pm_fresh_ready)) {
+		WRITE_ONCE(hpriv->pm_fresh_ready, false);
+		RPU_INFO_MAIN("checked PM cold firmware ready; starting normal MAC reset\n");
+	} else {
+		ret = rk915_notify_pm(hpriv, 1);
+		if (ret)
+			goto hal_deinit_bufs;
+	}
 
 	if (ftm)
 		CALL_RPU(rpu_prog_reset,
@@ -139,8 +146,8 @@ int rpu_core_init(struct img_priv *priv, unsigned int ftm)
 			  reset_type,
 			  LMAC_MODE_NORMAL);
 
-	if (wait_for_reset_complete(priv, 1) < 0) {
-		ret = -1;
+	ret = wait_for_reset_complete(priv, 1);
+	if (ret < 0) {
 		RPU_ERROR_MAIN("%s: wait_for_reset_complete failed\n", __func__);
 		goto hal_deinit_bufs;
 	}
@@ -169,8 +176,8 @@ int rpu_core_init(struct img_priv *priv, unsigned int ftm)
 
 	return 0;
 hal_deinit_bufs:
-	hal_ops.deinit_bufs();
 prog_rpu_fail:
+	hal_ops.deinit_bufs();
 hal_stop:
 	hal_ops.stop();
 rpu_if_deinit:
@@ -192,7 +199,7 @@ void rpu_core_deinit(struct img_priv *priv, unsigned int ftm)
 	/* De initialize tx  and disable LMAC*/
 	rpu_tx_deinit(priv);
 
-	if (!hpriv->fw_error) {
+	if (!READ_ONCE(hpriv->pm_need_cold) && !hpriv->fw_error) {
 		/* Disable the LMAC */
 		priv->reset_complete = 0;
 		RPU_INFO_MAIN("%s-UMAC: Reset (DISABLE)\n", priv->name);
@@ -213,11 +220,14 @@ void rpu_core_deinit(struct img_priv *priv, unsigned int ftm)
 		}
 
 		/* notify fw sleep */
-		rk915_notify_pm(hpriv, 0);
+		ret = rk915_notify_pm(hpriv, 0);
+		if (ret)
+			RPU_ERROR_MAIN("firmware sleep was not acknowledged: %d\n", ret);
 	}
 
 prog_rpu_fail:
-	wait_for_fw_error_process_complete(priv);
+	if (!READ_ONCE(hpriv->pm_need_cold))
+		wait_for_fw_error_process_complete(priv);
 
 	rpu_if_free_outstnding();
 
@@ -374,15 +384,21 @@ int rk915_wait_fw_ready_to_sleep(void)
     if (imgpriv) {
         imgpriv->read_csr_complete = 0;
         imgpriv->read_csr_value = 0;
-        rpu_prog_read_csr(0xbf2);
+        if (rpu_prog_read_csr(0xbf2))
+            return -EIO;
         wait_for_read_csr_cmp(imgpriv);
+        if (!READ_ONCE(imgpriv->read_csr_complete))
+            return -ETIMEDOUT;
         //RPU_INFO_MAIN("read_csr_value = %x\n", imgpriv->read_csr_value);
 
         if (imgpriv->read_csr_value & (1<<14)) {
             imgpriv->read_csr_complete = 0;
             imgpriv->read_csr_value = 0;
-            rpu_prog_read_csr(0xbf2);
+            if (rpu_prog_read_csr(0xbf2))
+                return -EIO;
             wait_for_read_csr_cmp(imgpriv);
+            if (!READ_ONCE(imgpriv->read_csr_complete))
+                return -ETIMEDOUT;
             //RPU_INFO_MAIN("read_csr_value = %x\n", imgpriv->read_csr_value);
         }
 

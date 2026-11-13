@@ -49,8 +49,19 @@
 #include "hal.h"
 #include "utils.h"
 #include "platform.h"
+#include "hal_io.h"
 
-static struct semaphore powerup_sem;
+static DEFINE_MUTEX(sdio_lifecycle_mutex);
+
+bool rk915_sdio_policy_lock(void)
+{
+	return mutex_trylock(&sdio_lifecycle_mutex);
+}
+
+void rk915_sdio_policy_unlock(void)
+{
+	mutex_unlock(&sdio_lifecycle_mutex);
+}
 
 #define RK915_SDIO_RESCAN_COUNT 3
 
@@ -284,14 +295,13 @@ static int _sdio_readb(struct host_io_info *host, u32 addr)
 	struct sdio_func *func = (struct sdio_func *)host->priv_data;
 
 	if (sdio_reset == true)
-		return 0;
+		return -EIO;
 
 	val = sdio_readb(func, addr, &error);
 
-	if (val == 0xff)
+	if (error)
 		return error;
-	else
-		return val;
+	return val;
 }
 
 static int _sdio_writeb(struct host_io_info *host, u32 addr, u8 val)
@@ -300,7 +310,7 @@ static int _sdio_writeb(struct host_io_info *host, u32 addr, u8 val)
 	int error;
 
 	if (sdio_reset == true)
-		return 0;
+		return -EIO;
 
 	sdio_writeb(func, val, addr, &error);
 	return error;
@@ -314,7 +324,7 @@ static int sdio_send_data_sg(struct host_io_info *host, u32 addr, u8 *buf, u32 l
 	int ret = 0;
 
 	if (sdio_reset == true)
-		return 0;
+		return -EIO;
 
 #ifdef TX_SG_MODE
 	ret = sdio_memcpy_toio_sg(func, addr, buf, len);
@@ -328,7 +338,7 @@ static int sdio_send_data(struct host_io_info *host, u32 addr, u8 *buf, u32 len)
 	struct sdio_func *func = (struct sdio_func *)host->priv_data;
 
 	if (sdio_reset == true)
-		return 0;
+		return -EIO;
 
 	return sdio_memcpy_toio(func, addr, buf, len);
 }
@@ -338,7 +348,7 @@ static int sdio_recv_data(struct host_io_info *host, u32 addr, u8 *buf, u32 len)
 	struct sdio_func *func = (struct sdio_func *)host->priv_data;
 
 	if (sdio_reset == true)
-		return 0;
+		return -EIO;
 
 	return sdio_memcpy_fromio(func, buf, addr, len);
 }
@@ -473,32 +483,33 @@ static int sdio_writeb_comp_timeout(struct host_io_info *host,
 	if (timeout_ms)
 		deadline = ktime_add_ms(ktime_get(), timeout_ms);
 	while (count--) {
-		if (hpriv->fw_error_processing)
-			return -1;
+		if (hpriv->fw_error_processing && !hpriv->during_fw_download &&
+		    !READ_ONCE(hpriv->recovery_io_ready))
+			return -EIO;
 
 		val = _sdio_readb(host, SDIO_HOST_WRITE_REQ_INT_STA);
 		if (val == 0) {
 			return 0;
 		} else if (val < 0) {
 			RPU_ERROR_SDIO("%s: error %d\n", __func__, val);
-			return -1;
+			return val;
 		}
 		/* A deadline cannot abort an already running MMC command. */
 		if (timeout_ms && ktime_compare(ktime_get(), deadline) >= 0) {
 			RPU_ERROR_SDIO("%s: EXPERIMENTAL PM wake ACK budget %u ms expired, val=%d\n",
 				      __func__, timeout_ms, val);
-			return -1;
+			return -ETIMEDOUT;
 		}
 		udelay(onetime);
 	}
 
 	RPU_ERROR_SDIO("%s: timeout val = %d\n", __func__, val);
-	return -1;
+	return -ETIMEDOUT;
 }
 
 static int sdio_writeb_comp(struct host_io_info *host)
 {
-	return sdio_writeb_comp_timeout(host, 0);
+	return sdio_writeb_comp_timeout(host, READ_ONCE(hpriv->pm_need_cold) ? 200 : 0);
 }
 
 static int sdio_notify_fw_pm(struct host_io_info *host, int wakeup)
@@ -506,11 +517,14 @@ static int sdio_notify_fw_pm(struct host_io_info *host, int wakeup)
 #if NOTIFY_M0_SLEEP
 	int msg = wakeup ? IO_NOTIFY_WAKEUP : IO_NOTIFY_SLEEP;
 	unsigned int timeout_ms = 0;
+	int ret;
 
 	if (wakeup && hpriv->during_pm_resume)
 		timeout_ms = READ_ONCE(pm_wake_ack_timeout_ms);
 	RPU_INFO_SDIO("notify m0 %s\n", wakeup ? "wakeup" : "sleep");
-	_sdio_writeb(host, IO_NOTIFY_ADDR, msg);
+	ret = _sdio_writeb(host, IO_NOTIFY_ADDR, msg);
+	if (ret)
+		return ret;
 	return sdio_writeb_comp_timeout(host, timeout_ms);
 #else
 	return 0;
@@ -561,6 +575,7 @@ static int add_rk915_device(struct sdio_func *func)
 err:
 	if (hpriv->plat_dev) {
 		platform_device_put(hpriv->plat_dev);
+		hpriv->plat_dev = NULL;
 	}
 	return ret;
 }
@@ -573,51 +588,114 @@ static void del_rk915_device(void)
 	hpriv->plat_dev = NULL;
 }
 
+/* Caller holds the function-pair lifecycle lock. Parent/IO state is ready
+ * before platform_device_add invokes the platform probe synchronously. */
+static int rk915_sdio_attach(void)
+{
+	struct host_io_info *host = hpriv->io_info;
+	int ret;
+
+	if (hpriv->plat_dev)
+		return 0;
+	if (!gfunc1 || !gfunc2 || gfunc1->card != gfunc2->card)
+		return -ENODEV;
+	host->priv_data = gfunc1;
+	host->dev = &gfunc1->dev;
+	host->io_ops = &sdio_host_ops;
+	host->irq = rockchip_wifi_get_oob_irq();
+#if SDIO_AUTO_SLEEP
+	INIT_DELAYED_WORK(&host->sleep_work, sleep_timer_expiry);
+#endif
+	host->bus_init = true;
+	ret = add_rk915_device(gfunc1);
+	/* device_add reports registration, not a successful platform probe. */
+	if (!ret && (!hpriv->hal_init || !hpriv->plat_dev->dev.driver)) {
+		/* A firmware-in-probe failure may follow successful HAL init. */
+		if (hpriv->hal_init) {
+			hal_ops.deinit(NULL);
+			rk915_free_irq(host);
+		}
+		del_rk915_device();
+		ret = -ENODEV;
+	}
+	if (ret) {
+		host->bus_init = false;
+		host->priv_data = NULL;
+		host->dev = NULL;
+		return ret;
+	}
+	RPU_INFO_SDIO("RK915-COLD: SDIO pair attached; platform/PHY probe ready\n");
+	return 0;
+}
+
 static int sdio_probe(struct sdio_func *func, const struct sdio_device_id *id)
 {
 	int ret = 0;
 
-	RPU_DEBUG_SDIO("%s.\n", __func__);
-	RPU_DEBUG_SDIO("sdio_func_num: 0x%X, vendor id: 0x%X, dev id: 0x%X, block size: 0x%X/0x%X\n",
-			func->num, func->vendor, func->device, func->max_blksize, func->cur_blksize);
-
+	if (func->num != 1 && func->num != 2)
+		return -ENODEV;
+	mutex_lock(&sdio_lifecycle_mutex);
 	if (func->num == 1)
 		gfunc1 = func;
 	else
 		gfunc2 = func;
-
 	RPU_INFO_SDIO("f1: 0x%p, f2: 0x%p.\n", gfunc1, gfunc2);
-	if (!(gfunc1 && gfunc2)) {
-		RPU_DEBUG_SDIO("%s: no valid func\n", __func__);
-		return 0;
+	if (!gfunc1 || !gfunc2)
+		goto out;
+	if (gfunc1->card != gfunc2->card) {
+		ret = -ENODEV;
+		goto fail;
 	}
-
 	sdio_claim_host(gfunc1);
 	ret = sdio_enable_func(gfunc1);
-	if (ret) {
-		RPU_ERROR_SDIO("%s: failed to enable func, error %d\n", __func__, ret);
-		sdio_release_host(gfunc1);
-		return -1;
-	}
-	RPU_INFO_SDIO("%s: enable func ok.\n", __func__);
+	if (!ret)
+		gfunc1->card->quirks |= MMC_QUIRK_LENIENT_FN0;
 	sdio_release_host(gfunc1);
-
-	gfunc1->card->quirks |= MMC_QUIRK_LENIENT_FN0;
+	if (ret)
+		goto fail;
 	sdio_reset = false;
-
-	up(&powerup_sem);
-
+	ret = rk915_sdio_attach();
+	if (ret)
+		goto fail;
+	goto out;
+fail:
+	RPU_ERROR_SDIO("SDIO pair attachment failed: %d\n", ret);
+	if (func == gfunc1)
+		gfunc1 = NULL;
+	if (func == gfunc2)
+		gfunc2 = NULL;
+out:
+	mutex_unlock(&sdio_lifecycle_mutex);
 	return ret;
 }
 
-static void sdio_remove(struct sdio_func *func) 
+static void sdio_remove(struct sdio_func *func)
 {
-	if (hpriv->plat_dev &&
-		hpriv->plat_dev->dev.parent == &func->dev) {
-		del_rk915_device();
+	struct host_io_info *host = hpriv->io_info;
+
+	mutex_lock(&sdio_lifecycle_mutex);
+	if (func == gfunc1 || func == gfunc2) {
+		/* Administrative removal is real. Unregister/cancel the old MAC
+		 * before invalidating any IO pointers; a later pair can reprobe. */
+		if (hpriv->plat_dev)
+			del_rk915_device();
+		/* An unbound module no longer owns the detect barrier. Normal
+		 * core removal may already have marked the card removed. */
+		(void)sdio_set_cold_reset(func, false);
+		host->bus_init = false;
+		host->priv_data = NULL;
+		host->dev = NULL;
+		WRITE_ONCE(hpriv->pm_need_cold, true);
+		WRITE_ONCE(hpriv->pm_fail_closed, true);
+		WRITE_ONCE(hpriv->pm_transport_ready, false);
+		WRITE_ONCE(hpriv->pm_system_suspend, false);
+		hpriv->during_pm_resume = 0;
 	}
-	gfunc1 = NULL;
-	gfunc2 = NULL;
+	if (func == gfunc1)
+		gfunc1 = NULL;
+	if (func == gfunc2)
+		gfunc2 = NULL;
+	mutex_unlock(&sdio_lifecycle_mutex);
 }
 
 #define dev_to_sdio_func(d)	container_of(d, struct sdio_func, dev)
@@ -635,6 +713,8 @@ static int sdio_suspend(struct device *dev)
 	}
 
 	RPU_INFO_SDIO("%s enter\n", __func__);
+	if (!mutex_trylock(&hpriv->fw_mutex))
+		return -EBUSY;
 
 	sdio_flags = sdio_get_host_pm_caps(func);
 	if (!(sdio_flags & MMC_PM_KEEP_POWER)) {
@@ -651,6 +731,35 @@ static int sdio_suspend(struct device *dev)
 		goto out;
 	}
 
+	if (READ_ONCE(pm_checked_resume)) {
+		WRITE_ONCE(hpriv->pm_need_cold, true);
+		WRITE_ONCE(hpriv->pm_fail_closed, true);
+		WRITE_ONCE(hpriv->pm_transport_ready, false);
+		ret = rk915_pm_quiesce(hpriv, true);
+		if (ret)
+			goto out;
+		/* Establish the detect barrier BEFORE the first power-off. */
+		ret = sdio_set_cold_reset(func, true);
+		if (ret)
+			goto out;
+		ret = rockchip_wifi_power(0);
+		if (ret)
+			goto out;
+		wifi->params.fw_loaded = 0;
+		WRITE_ONCE(hpriv->pm_notify_error, 0);
+		WRITE_ONCE(hpriv->defer_resume_wake, 0);
+		RPU_INFO_SDIO("RK915-COLD: chip reset/off for suspend; no M0 handshake\n");
+	}
+
+	/* stop() cannot return an error to mac80211; fail system suspend here. */
+	if (READ_ONCE(hpriv->pm_notify_error)) {
+		ret = READ_ONCE(hpriv->pm_notify_error);
+		goto out;
+	}
+	if (READ_ONCE(pm_checked_resume)) {
+		WRITE_ONCE(hpriv->pm_transport_ready, false);
+		WRITE_ONCE(hpriv->pm_need_cold, true);
+	}
 	hpriv->during_pm_resume = 1;
 
 #if SUPPORT_SDIO_SLEEP
@@ -661,6 +770,7 @@ static int sdio_suspend(struct device *dev)
 	// disable_irq(hpriv->io_info->irq);
 
 out:
+	mutex_unlock(&hpriv->fw_mutex);
 	return ret;
 }
 
@@ -697,11 +807,12 @@ static struct sdio_driver rk915_sdio_driver = {
 		.id_table = rk915_sdio_devices,
 		.probe = sdio_probe,
 		.remove = sdio_remove,
-#ifdef CONFIG_PM		
 		.drv = {
+			.probe_type = PROBE_FORCE_SYNCHRONOUS,
+#ifdef CONFIG_PM
 			.pm = &sdio_pm_ops,
-		}
 #endif
+		}
 };
 
 int rk915_sdio_register_driver(void)
@@ -716,58 +827,87 @@ void rk915_sdio_unregister_driver(void)
 
 void rk915_sdio_pre_init(void)
 {
-    sema_init(&powerup_sem, 0);
+	gfunc1 = NULL;
+	gfunc2 = NULL;
 }
 
-int rk915_sdio_init(struct host_io_info *phost)
+static bool rk915_card_matches(struct mmc_card *card)
 {
-	int retry;
-	struct host_io_info *host = phost;
+	struct sdio_func *func;
 
-//	mmc_debug_level = 0;
+	if (!card || card->type != MMC_TYPE_SDIO)
+		return false;
+	func = card->sdio_func[0];
+	return func && func->vendor == MANUFACTURER_CODE &&
+		(func->device == MANUFACTURER_ID_EAGLE_BASE ||
+		 func->device == MANUFACTURER_ID_EAGLE_BASEX);
+}
 
-	retry = RK915_SDIO_RESCAN_COUNT;
+/* Module bootstrap only, BEFORE registering the SDIO driver. rfkill's
+ * wifi_set_carddetect is a stub in this BSP. Explicitly restore an unbound
+ * retained card, or scan a missing card, so Android off/on is self-contained.
+ * No firmware download or DPM callback runs here. */
+int rk915_sdio_prepare_card(void)
+{
+	struct mmc_host *host = mmc_get_rk915_host();
+	bool scan = false;
+	int ret = -ENODEV;
 
-reinit:
-    if (!gfunc1) {
-    	/* power up and rescan */
-    	rk915_poweron();
-    	mdelay(200);
-    	rk915_rescan_card(1);
+	if (!host)
+		return ret;
+	/* Pins/ops may not disappear behind a concurrent controller unbind. */
+	device_lock(host->parent);
+	if (!host->parent->driver || READ_ONCE(host->rescan_disable))
+		goto put;
+	cancel_delayed_work_sync(&host->detect);
+	__mmc_claim_host(host, NULL, NULL);
+	if (host->card) {
+		if (!rk915_card_matches(host->card))
+			goto release;
+		if (atomic_read(&host->card->sdio_funcs_probed)) {
+			ret = -EBUSY;
+			goto release;
+		}
+		host->card->quirks |= MMC_QUIRK_RK915_COLD_RESET;
+	}
+	ret = rk915_poweron();
+	if (!ret && host->card) {
+		/* No functions are bound: mmc_sdio_hw_reset is synchronous and
+		 * restores RCA, clock, bus width and CCCR before func probe. */
+		ret = mmc_hw_reset(host);
+		RPU_INFO_SDIO("RK915-COLD: bootstrap retained card reset ret=%d\n", ret);
+	} else if (!ret) {
+		scan = true;
+	}
+	/* No module/PHY is registered yet, so never leak ownership on error. */
+	if (host->card)
+		host->card->quirks &= ~MMC_QUIRK_RK915_COLD_RESET;
+release:
+	mmc_release_host(host);
+	if (!ret && scan) {
+		mmc_detect_change(host, 0);
+		flush_delayed_work(&host->detect);
+		__mmc_claim_host(host, NULL, NULL);
+		ret = rk915_card_matches(host->card) ? 0 : -ENODEV;
+		mmc_release_host(host);
+		RPU_INFO_SDIO("RK915-COLD: bootstrap fresh host scan ret=%d\n", ret);
+	}
+put:
+	device_unlock(host->parent);
+	put_device(&host->class_dev);
+	return ret;
+}
 
-    	if (down_timeout(&powerup_sem, msecs_to_jiffies(800))) {
-    		rk915_rescan_card(0);
-    		rk915_poweroff();
-    		mdelay(200);
+int rk915_sdio_init(struct host_io_info *host)
+{
+	int ret;
 
-    		if (retry == 0)
-    			goto fail;
-
-    		RPU_ERROR_SDIO("rk915 sdio probe failed, retry (%d)\n", retry);
-    		retry--;
-    		goto reinit;
-    	}
-    }
-
-	RPU_DEBUG_SDIO("%s rk915 sdio probe success\n", __func__);
-
-	host->priv_data = (void *)gfunc1;
-	host->dev = &gfunc1->dev;
-
-	host->io_ops = &sdio_host_ops;
-	host->irq = rockchip_wifi_get_oob_irq();
-#if SDIO_AUTO_SLEEP
-	// init delay sleep worker
-	INIT_DELAYED_WORK(&host->sleep_work, sleep_timer_expiry);
-#endif
-	phost->bus_init = true;
-
-	add_rk915_device(gfunc1);
-
-	return 0;
-
-fail:
-	return -1;
+	/* All enumeration/probing precedes this call. Every real probe owns
+	 * platform creation; no one-shot semaphore/bootstrap waiter remains. */
+	mutex_lock(&sdio_lifecycle_mutex);
+	ret = host->bus_init && hpriv->hal_init ? 0 : -ENODEV;
+	mutex_unlock(&sdio_lifecycle_mutex);
+	return ret;
 }
 
 int rk915_sdio_deinit(struct host_io_info *phost)
@@ -839,21 +979,6 @@ static int rk915_mmc_select_card(struct mmc_host *host, struct mmc_card *card)
 		return err;
 
 	return 0;
-}
-
-static int rk915_sdio_reset(struct mmc_card *card)
-{
-	int ret;
-	u8 abort;
-
-	ret = rk915_mmc_io_rw_direct_host(card->host, 0, 0, SDIO_CCCR_ABORT, 0, &abort);
-	if (ret)
-		abort = 0x08;
-	else
-		abort |= 0x08;
-
-	ret = rk915_mmc_io_rw_direct_host(card->host, 1, 0, SDIO_CCCR_ABORT, abort, NULL);
-	return ret;
 }
 
 static int rk915_mmc_go_idle(struct mmc_host *host)
@@ -1057,12 +1182,9 @@ int rk915_sdio_recovery_init(struct host_io_info *phost)
 	shost->ios.power_mode = MMC_POWER_OFF;
 	rk915_mmc_power_up(shost, 1);
 
-	err = rk915_sdio_reset(func->card);
-	/*if (err) {
-		RPU_ERROR_ROCOVERY("rk915_sdio_reset failed (%d)\n", err);
-		goto err_out;
-	}*/
-
+	/* Caller has power-cycled the chip. Start enumeration with CMD0;
+	 * a pre-enumeration CMD52 abort is not a valid function-ready test.
+	 */
 	err = rk915_mmc_go_idle(shost);
 	if (err) {
 		RPU_ERROR_ROCOVERY("rk915_mmc_go_idle failed (%d)\n", err);
@@ -1089,6 +1211,7 @@ int rk915_sdio_recovery_init(struct host_io_info *phost)
 		goto err_out;
 	}
 
+	func->card->rca = rca;
 	err = rk915_mmc_select_card(shost, func->card);
 	if (err) {
 		RPU_ERROR_ROCOVERY("rk915_mmc_select_card failed (%d)\n", err);
@@ -1098,6 +1221,8 @@ int rk915_sdio_recovery_init(struct host_io_info *phost)
 	err = rk915_sdio_enable_hs(func->card);
 	if (err <= 0) {
 		RPU_ERROR_ROCOVERY("rk915_sdio_enable_hs failed (%d)\n", err);
+		if (!err)
+			err = -EOPNOTSUPP;
 		goto err_out;
 	}
 
@@ -1108,6 +1233,8 @@ int rk915_sdio_recovery_init(struct host_io_info *phost)
 		rk915_mmc_set_bus_width(shost, MMC_BUS_WIDTH_4);
 	} else {
 		RPU_ERROR_ROCOVERY("rk915_sdio_enable_4bit_bus failed (%d)\n", err);
+		if (!err)
+			err = -EOPNOTSUPP;
 		goto err_out;
 	}
 

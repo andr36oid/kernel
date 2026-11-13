@@ -8,6 +8,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/mmc/sdio_func.h>
 #include <linux/etherdevice.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
@@ -555,7 +556,8 @@ static void dump_ampdu_action_info(unsigned int action)
 
 void rk915_signal_io_error(int reason)
 {
-	if (hpriv->shutdown || hpriv->during_fw_download)
+	if (hpriv->shutdown || hpriv->during_fw_download ||
+	    READ_ONCE(hpriv->pm_fail_closed))
 		return;
 	hpriv->fw_error = 1;
 	if (!hpriv->fw_error_processing) {
@@ -764,26 +766,45 @@ static int start(struct ieee80211_hw *hw)
 
 	RPU_DEBUG_UMACIF("%s-80211IF: In start\n", priv->name);
 
+	/* Do not wait for a recovery/RX callback while holding priv->mutex. */
+	if (READ_ONCE(hpriv->pm_need_cold)) {
+		RPU_INFO_UMACIF("RK915-COLD: start checked firmware download\n");
+		flush_work(&hpriv->fw_err_work);
+		WRITE_ONCE(hpriv->pm_fail_closed, true);
+		ret = rk915_pm_quiesce(hpriv, true);
+		if (ret)
+			return ret;
+	}
 	mutex_lock(&priv->mutex);
 
 	hpriv->fw_error = 0;
-	if (!down_fw_in_probe && !wifi->params.fw_loaded) {
-		if (hpriv->fw_bring_up_func((void *)hpriv) != 0) {
-			ret = -ENODEV;
+	if (READ_ONCE(hpriv->pm_need_cold) ||
+	    (!down_fw_in_probe && !wifi->params.fw_loaded)) {
+		ret = hpriv->fw_bring_up_func((void *)hpriv);
+		if (ret) {
 			goto out;
 		}
 		wifi->params.fw_loaded = 1;
 	}
 
-	if ((rpu_core_init(priv, ftm)) < 0) {
+	ret = rpu_core_init(priv, ftm);
+	if (ret < 0) {
 		RPU_ERROR_UMACIF("%s-80211IF: umac init failed\n", priv->name);
-		ret = -ENODEV;
 		goto out;
 	}
 
 	INIT_DELAYED_WORK(&priv->roc_complete_work, rpu_roc_complete_work);
 
+	if (READ_ONCE(hpriv->pm_need_cold)) {
+		ret = sdio_set_cold_reset(hpriv->io_info->priv_data, false);
+		if (ret)
+			goto out;
+	}
 	priv->state = STARTED;
+	if (READ_ONCE(hpriv->pm_need_cold))
+		RPU_INFO_UMACIF("RK915-COLD: firmware and MAC ready\n");
+	WRITE_ONCE(hpriv->pm_need_cold, false);
+	WRITE_ONCE(hpriv->pm_fail_closed, false);
 	memset(priv->params->pdout_voltage, 0,
 	       sizeof(char) * MAX_AUX_ADC_SAMPLES);
 
@@ -792,6 +813,13 @@ static int start(struct ieee80211_hw *hw)
 	priv->params->hw_scan_status = HW_SCAN_STATUS_NONE;
 
 out:
+	if (ret && READ_ONCE(hpriv->pm_need_cold)) {
+		WRITE_ONCE(hpriv->hal_disabled, 1);
+		WRITE_ONCE(hpriv->fw_error, 1);
+		WRITE_ONCE(hpriv->pm_transport_ready, false);
+		WRITE_ONCE(hpriv->pm_fresh_ready, false);
+		wifi->params.fw_loaded = 0;
+	}
 	mutex_unlock(&priv->mutex);
 	return ret;
 }
@@ -801,6 +829,15 @@ void stop(struct ieee80211_hw *hw)
 	struct img_priv    *priv= (struct img_priv *)hw->priv;
 
 	RPU_DEBUG_UMACIF("%s-80211IF:In stop\n", priv->name);
+
+	if (READ_ONCE(pm_checked_resume) && READ_ONCE(hpriv->pm_system_suspend)) {
+		WRITE_ONCE(hpriv->pm_need_cold, true);
+		WRITE_ONCE(hpriv->pm_fail_closed, true);
+		WRITE_ONCE(hpriv->pm_transport_ready, false);
+		/* A pending recovery must finish before software buffers are freed. */
+		flush_work(&hpriv->fw_err_work);
+		rk915_pm_quiesce(hpriv, true);
+	}
 
 	mutex_lock(&priv->mutex);
 
@@ -2450,6 +2487,14 @@ int rpu_init(void)
 	priv->current_vif_count = 0;
 	priv->stats->system_rev = system_rev;
 
+	error = ieee80211_enable_deferred_resume(hw);
+	if (!error)
+		error = ieee80211_set_deferred_resume(hw,
+						     READ_ONCE(pm_checked_resume));
+	if (error) {
+		ieee80211_free_hw(hw);
+		goto out;
+	}
 	/*Register hardware*/
 	error = ieee80211_register_hw(hw);
 
@@ -2485,7 +2530,7 @@ int rpu_init(void)
 		goto out;
 	} else {
 		RPU_ERROR_UMACIF("%s: ieee80211_register_hw failed\n", __func__);
-		rpu_exit();
+		ieee80211_free_hw(hw);
 		goto out;
 	}
 

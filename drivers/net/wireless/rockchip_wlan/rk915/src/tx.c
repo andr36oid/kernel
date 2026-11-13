@@ -1000,7 +1000,8 @@ void rpu_tx_deinit(struct img_priv *priv)
 
 	ieee80211_stop_queues(priv->hw);
 
-	wait_for_tx_complete(tx);
+	if (!READ_ONCE(hpriv->pm_need_cold))
+		wait_for_tx_complete(tx);
 
 	spin_lock_bh(&tx->lock);
 

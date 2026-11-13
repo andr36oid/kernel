@@ -939,9 +939,52 @@ static int mmc_sdio_alive(struct mmc_host *host)
 /*
  * Card detection callback from host.
  */
+/* This is a driver-owned transaction, not a permanent non-removable quirk.
+ * Serialize with presence checks before powering/resetting a live SDIO card.
+ * The functions/netdev stay registered while the checked worker rebuilds it.
+ * Failure keeps the hold so interface down/up can retry; explicit host removal
+ * still tears everything down normally. Never apply this to SD/eMMC/other IDs.
+ */
+int sdio_set_cold_reset(struct sdio_func *func, bool hold)
+{
+	struct mmc_card *card = func->card;
+	struct mmc_host *host = card->host;
+	int ret = 0;
+
+	if (!(host->caps2 & MMC_CAP2_WIFI_RK915) ||
+	    func->vendor != 0x0296 ||
+	    (func->device != 0x5347 && func->device != 0x5348))
+		return -EOPNOTSUPP;
+	mmc_claim_host(host);
+	if (host->card != card || mmc_card_removed(card)) {
+		ret = -ENOMEDIUM;
+	} else if (hold) {
+		if (!(card->quirks & MMC_QUIRK_RK915_COLD_RESET))
+			dev_info(&func->dev, "RK915-COLD: card detection held before reset\n");
+		card->quirks |= MMC_QUIRK_RK915_COLD_RESET;
+	} else {
+		if (card->quirks & MMC_QUIRK_RK915_COLD_RESET)
+			dev_info(&func->dev, "RK915-COLD: card detection released after MAC ready\n");
+		card->quirks &= ~MMC_QUIRK_RK915_COLD_RESET;
+	}
+	mmc_release_host(host);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(sdio_set_cold_reset);
+
 static void mmc_sdio_detect(struct mmc_host *host)
 {
 	int err;
+
+	/* The class complete hook schedules this BEFORE PM_POST_SUSPEND. The
+	 * chip is deliberately off then; probing it would unregister the PHY
+	 * whose deferred worker is responsible for powering it back on. */
+	mmc_claim_host(host);
+	if (host->card->quirks & MMC_QUIRK_RK915_COLD_RESET) {
+		mmc_release_host(host);
+		return;
+	}
+	mmc_release_host(host);
 
 	/* Make sure card is powered before detecting it */
 	if (host->caps & MMC_CAP_POWER_OFF_CARD) {
@@ -1114,6 +1157,9 @@ out:
 
 static int mmc_sdio_runtime_suspend(struct mmc_host *host)
 {
+	if (READ_ONCE(host->card->quirks) & MMC_QUIRK_RK915_COLD_RESET)
+		return 0;
+
 	/* No references to the card, cut the power to it. */
 	mmc_claim_host(host);
 	mmc_power_off(host);
@@ -1125,6 +1171,9 @@ static int mmc_sdio_runtime_suspend(struct mmc_host *host)
 static int mmc_sdio_runtime_resume(struct mmc_host *host)
 {
 	int ret;
+
+	if (READ_ONCE(host->card->quirks) & MMC_QUIRK_RK915_COLD_RESET)
+		return 0;
 
 	/* Restore power and re-initialize. */
 	mmc_claim_host(host);

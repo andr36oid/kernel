@@ -128,6 +128,7 @@ extern void sdio_claim_host(struct sdio_func *func);
 extern void sdio_release_host(struct sdio_func *func);
 
 extern int sdio_enable_func(struct sdio_func *func);
+extern int sdio_set_cold_reset(struct sdio_func *func, bool hold);
 extern int sdio_disable_func(struct sdio_func *func);
 
 extern int sdio_set_block_size(struct sdio_func *func, unsigned blksz);

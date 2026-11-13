@@ -19,6 +19,9 @@ int rk915_ejtag(struct hal_priv *priv);
 int rk915_serias_read(struct hal_priv *priv, u16 addr,
 						void *buf, size_t buf_len, u32 max_len);
 int rk915_io_reset(struct hal_priv *priv);
-void rk915_notify_pm(struct hal_priv *priv, int wakeup);
+int rk915_notify_pm(struct hal_priv *priv, int wakeup);
+extern bool pm_checked_resume;
+int rk915_pm_quiesce(struct hal_priv *priv, bool flush_rx);
+void rk915_pm_unquiesce(struct hal_priv *priv);
 
 #endif //_COMMON_IO_H

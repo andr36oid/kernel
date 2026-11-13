@@ -1042,6 +1042,9 @@ int ieee80211_do_open(struct wireless_dev *wdev, bool coming_up)
 	int res;
 	u32 hw_reconf_flags = 0;
 
+	if (ieee80211_resume_blocked(local))
+		return -EAGAIN;
+
 	switch (sdata->vif.type) {
 	case NL80211_IFTYPE_WDS:
 		if (!is_valid_ether_addr(sdata->u.wds.remote_addr))

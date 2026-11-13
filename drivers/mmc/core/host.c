@@ -95,6 +95,22 @@ static struct class mmc_host_class = {
 	.pm		= MMC_HOST_CLASS_DEV_PM_OPS,
 };
 
+static int mmc_match_rk915_host(struct device *dev, const void *data)
+{
+	struct mmc_host *host = cls_dev_to_mmc_host(dev);
+
+	return !!(host->caps2 & MMC_CAP2_WIFI_RK915);
+}
+
+struct mmc_host *mmc_get_rk915_host(void)
+{
+	struct device *dev;
+
+	dev = class_find_device(&mmc_host_class, NULL, NULL, mmc_match_rk915_host);
+	return dev ? cls_dev_to_mmc_host(dev) : NULL;
+}
+EXPORT_SYMBOL_GPL(mmc_get_rk915_host);
+
 int mmc_register_host_class(void)
 {
 	return class_register(&mmc_host_class);

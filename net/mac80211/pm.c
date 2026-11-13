@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <net/mac80211.h>
+#include <linux/suspend.h>
 #include <net/rtnetlink.h>
 
 #include "ieee80211_i.h"
@@ -20,6 +21,10 @@ int __ieee80211_suspend(struct ieee80211_hw *hw, struct cfg80211_wowlan *wowlan)
 	struct ieee80211_sub_if_data *sdata;
 	struct sta_info *sta;
 
+	local->resume_cycle_deferred = local->defer_system_resume &&
+		READ_ONCE(local->defer_resume_enabled);
+	if (local->resume_cycle_deferred && wowlan)
+		return -EOPNOTSUPP;
 	if (!local->open_count)
 		goto suspend;
 
@@ -183,6 +188,8 @@ int __ieee80211_suspend(struct ieee80211_hw *hw, struct cfg80211_wowlan *wowlan)
 	ieee80211_stop_device(local);
 
  suspend:
+	if (local->resume_cycle_deferred)
+		cfg80211_block_resume_requests(local->hw.wiphy, true);
 	local->suspended = true;
 	/* need suspended to be visible before quiescing is false */
 	barrier();
@@ -206,3 +213,159 @@ void ieee80211_report_wowlan_wakeup(struct ieee80211_vif *vif,
 	cfg80211_report_wowlan_wakeup(&sdata->wdev, wakeup, gfp);
 }
 EXPORT_SYMBOL(ieee80211_report_wowlan_wakeup);
+
+/* Reconfiguration may sleep on SDIO or firmware. It must run only AFTER all
+ * device PM callbacks and task thaw, not from a PM notifier or a DPM callback.
+ * RTNL serializes interface down/up/removal against the complete restart.
+ */
+static void ieee80211_deferred_resume_work(struct work_struct *work)
+{
+	struct ieee80211_local *local = container_of(work, struct ieee80211_local,
+						    resume_work);
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&local->resume_lock, flags);
+	if (local->resume_stopping || !local->resume_pending) {
+		spin_unlock_irqrestore(&local->resume_lock, flags);
+		return;
+	}
+	local->resume_running = true;
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+
+	/* A thawed restart worker can need RTNL: join it BEFORE taking RTNL. */
+	cancel_work_sync(&local->restart_work);
+	rtnl_lock();
+	if (!READ_ONCE(local->resume_stopping)) {
+		wiphy_info(local->hw.wiphy,
+			   "RK915-COLD: async MAC restart after PM_POST_SUSPEND\n");
+		ret = ieee80211_reconfig(local);
+		if (ret) {
+			/* reconfig_failure closes interfaces; clear PM-only state so
+			 * a later explicit interface up can retry the checked start. */
+			local->resuming = false;
+			local->suspended = false;
+			local->in_reconfig = false;
+		}
+		cfg80211_block_resume_requests(local->hw.wiphy, false);
+		wiphy_info(local->hw.wiphy,
+			   "RK915-COLD: async MAC restart done err=%d; interface retained\n",
+			   ret);
+	}
+	rtnl_unlock();
+	spin_lock_irqsave(&local->resume_lock, flags);
+	local->resume_pending = false;
+	local->resume_running = false;
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+}
+
+static int ieee80211_deferred_resume_pm(struct notifier_block *nb,
+				       unsigned long action, void *data)
+{
+	struct ieee80211_local *local = container_of(nb, struct ieee80211_local,
+						    resume_notifier);
+	unsigned long flags;
+	bool queue = false, busy = false;
+
+	spin_lock_irqsave(&local->resume_lock, flags);
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+		busy = local->resume_pending || local->resume_running ||
+		       local->resume_stopping;
+		if (!busy)
+			local->resume_preparing = true;
+		break;
+	case PM_POST_SUSPEND:
+		local->resume_preparing = false;
+		queue = local->resume_pending && !local->resume_stopping;
+		break;
+	default:
+		break;
+	}
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+	/* Never wait for the worker while a PM mutex is held. A second suspend
+	 * during the restart fails promptly and can be retried once Wi-Fi is up. */
+	if (busy)
+		return NOTIFY_BAD;
+	if (queue)
+		queue_work(system_unbound_wq, &local->resume_work);
+	return NOTIFY_DONE;
+}
+
+int ieee80211_enable_deferred_resume(struct ieee80211_hw *hw)
+{
+	struct ieee80211_local *local = hw_to_local(hw);
+	int ret;
+
+	if (WARN_ON(local->defer_system_resume || hw->wiphy->registered))
+		return -EINVAL;
+	if (hw->wiphy->wowlan)
+		return -EOPNOTSUPP;
+	spin_lock_init(&local->resume_lock);
+	INIT_WORK(&local->resume_work, ieee80211_deferred_resume_work);
+	local->resume_notifier.notifier_call = ieee80211_deferred_resume_pm;
+	/* POST runs after the driver clears its system-resume flags. PREPARE
+	 * may reject after the driver marks preparation; POST unwinds it. */
+	local->resume_notifier.priority = -10;
+	ret = register_pm_notifier(&local->resume_notifier);
+	if (!ret) {
+		local->defer_system_resume = true;
+		local->defer_resume_enabled = true;
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ieee80211_enable_deferred_resume);
+
+/* RTNL is held by live callers. Before registration there are no competitors. */
+int ieee80211_set_deferred_resume(struct ieee80211_hw *hw, bool enabled)
+{
+	struct ieee80211_local *local = hw_to_local(hw);
+	unsigned long flags;
+	int ret = 0;
+
+	if (!local->defer_system_resume)
+		return -EOPNOTSUPP;
+	spin_lock_irqsave(&local->resume_lock, flags);
+	if (local->resume_pending || local->resume_running ||
+	    local->resume_preparing || local->resume_stopping ||
+	    local->suspended || local->resuming || local->in_reconfig)
+		ret = -EBUSY;
+	else
+		WRITE_ONCE(local->defer_resume_enabled, enabled);
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ieee80211_set_deferred_resume);
+
+void ieee80211_disable_deferred_resume(struct ieee80211_local *local)
+{
+	unsigned long flags;
+
+	if (!local->defer_system_resume)
+		return;
+	/* unregister_hw/free_hw call this before taking RTNL or freeing state. */
+	spin_lock_irqsave(&local->resume_lock, flags);
+	local->resume_stopping = true;
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+	unregister_pm_notifier(&local->resume_notifier);
+	cancel_work_sync(&local->resume_work);
+	local->defer_system_resume = false;
+}
+
+int ieee80211_defer_resume(struct ieee80211_local *local)
+{
+	unsigned long flags;
+
+	ASSERT_RTNL();
+	spin_lock_irqsave(&local->resume_lock, flags);
+	if (local->resume_stopping) {
+		spin_unlock_irqrestore(&local->resume_lock, flags);
+		return -ESHUTDOWN;
+	}
+	local->resume_pending = true;
+	spin_unlock_irqrestore(&local->resume_lock, flags);
+	cfg80211_block_resume_requests(local->hw.wiphy, true);
+	wiphy_info(local->hw.wiphy,
+		   "RK915-COLD: resume deferred; no firmware I/O in DPM\n");
+	return 0;
+}
