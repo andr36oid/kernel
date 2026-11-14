@@ -119,5 +119,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Kernel $KREL dArkOSen, $STAMP ($SHORT)" \
-            --notes "Built from $GITHUB_SHA by workflow run $GITHUB_RUN_ID." \
+            --notes "ignore this unless you know what you are doing" \
             --latest
