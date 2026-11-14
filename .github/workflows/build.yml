@@ -105,7 +105,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: darkosen-kernel-${{ env.KREL }}
+          name: andr36oid-kernel-${{ env.KREL }}
           path: dist/
 
       - name: Publish release
