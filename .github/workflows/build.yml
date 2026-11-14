@@ -118,6 +118,6 @@ jobs:
           gh release create "$STAMP" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Kernel $KREL andr36oid, $STAMP ($SHORT)" \
+            --title "Kernel $KREL, $STAMP ($SHORT)" \
             --notes "ignore this unless you know what you are doing" \
             --latest
