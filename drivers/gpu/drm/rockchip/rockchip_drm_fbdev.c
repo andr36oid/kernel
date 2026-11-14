@@ -5,6 +5,7 @@
  */
 
 #include <drm/drm.h>
+#include <drm/a36-logo-blit.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_probe_helper.h>
@@ -33,6 +34,53 @@ static const struct fb_ops rockchip_drm_fbdev_ops = {
 	.fb_copyarea	= drm_fb_helper_cfb_copyarea,
 	.fb_imageblit	= drm_fb_helper_cfb_imageblit,
 };
+
+/* Called while the fb-helper configures its first BO, before that BO can
+ * replace the loader plane. The framebuffer reference pins the reserved pixels
+ * throughout the bounded copy. Failure leaves the ordinary cleared BO intact.
+ */
+static void rockchip_fbdev_seed_logo(struct drm_device *dev,
+                                    struct rockchip_gem_object *bo,
+                                    const struct drm_mode_fb_cmd2 *cmd)
+{
+ struct drm_crtc *crtc;
+ struct drm_plane_state *ps;
+ struct drm_framebuffer *fb;
+ struct rockchip_logo *logo;
+ struct a36_logo_pixels src, dst;
+ unsigned int dbpp;
+ int ret;
+
+ if(cmd->pixel_format==DRM_FORMAT_XRGB8888)dbpp=32;
+ else if(cmd->pixel_format==DRM_FORMAT_RGB888)dbpp=24;
+ else if(cmd->pixel_format==DRM_FORMAT_RGB565)dbpp=16;
+ else return;
+ drm_for_each_crtc(crtc,dev) {
+  ps=crtc->primary ? crtc->primary->state:NULL;
+  fb=ps ? ps->fb:NULL;
+  if(!fb || !(fb->flags & ROCKCHIP_DRM_MODE_LOGO_FB) ||
+     !crtc->state->active || to_rockchip_crtc_state(crtc->state)->panel_prepare_error)
+   continue;
+  drm_framebuffer_get(fb);
+  logo=to_rockchip_logo_fb(fb)->logo;
+  src=(struct a36_logo_pixels){logo->kvaddr,logo->size,fb->width,
+       fb->height,fb->pitches[0],fb->offsets[0],0};
+  if(fb->format->format==DRM_FORMAT_RGB565)src.bpp=16;
+  else if(fb->format->format==DRM_FORMAT_RGB888)src.bpp=24;
+  else if(fb->format->format==DRM_FORMAT_XRGB8888)src.bpp=32;
+  dst=(struct a36_logo_pixels){bo->kvaddr,bo->base.size,cmd->width,
+       cmd->height,cmd->pitches[0],0,dbpp};
+  ret=a36_logo_blit(&dst,&src,ps->crtc_x,ps->crtc_y,ps->crtc_w,ps->crtc_h,
+      ps->src_x>>16,ps->src_y>>16,ps->src_w>>16,ps->src_h>>16,
+      !!(ps->rotation & DRM_MODE_REFLECT_Y));
+  drm_framebuffer_put(fb);
+  if(!ret) {
+   dev_info(dev->dev,"LOGO32: retained pixels seeded into fbdev BO\n");
+   return;
+  }
+  dev_warn(dev->dev,"LOGO32: logo copy rejected; no out-of-bounds read\n");
+ }
+}
 
 static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 				     struct drm_fb_helper_surface_size *sizes)
@@ -63,6 +111,7 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 		return -ENOMEM;
 
 	private->fbdev_bo = &rk_obj->base;
+	rockchip_fbdev_seed_logo(dev, rk_obj, &mode_cmd);
 
 	fbi = drm_fb_helper_alloc_fbi(helper);
 	if (IS_ERR(fbi)) {

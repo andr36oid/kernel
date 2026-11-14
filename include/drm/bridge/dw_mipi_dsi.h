@@ -15,6 +15,8 @@
 
 struct drm_display_mode;
 struct drm_encoder;
+struct drm_bridge;
+struct drm_atomic_state;
 struct dw_mipi_dsi;
 struct mipi_dsi_device;
 struct platform_device;
@@ -27,8 +29,12 @@ struct dw_mipi_dsi_dphy_timing {
 };
 
 struct dw_mipi_dsi_phy_ops {
+	int (*adopt_loader)(void *priv_data);
+	int (*hold_loader)(void *priv_data, bool on);
 	int (*init)(void *priv_data);
 	void (*power_on)(void *priv_data);
+	int (*power_on_checked)(void *priv_data);
+	int (*power_off_checked)(void *priv_data);
 	void (*power_off)(void *priv_data);
 	int (*get_lane_mbps)(void *priv_data,
 			     const struct drm_display_mode *mode,
@@ -47,6 +53,10 @@ struct dw_mipi_dsi_host_ops {
 };
 
 struct dw_mipi_dsi_plat_data {
+	bool prepare_before_crtc;
+	int (*frame_ready)(void *priv_data);
+	int (*quiesce_before_panel_off)(void *priv_data);
+	void (*panel_fail)(void *priv_data, int error);
 	void __iomem *base;
 	unsigned int max_data_lanes;
 
@@ -69,4 +79,33 @@ void dw_mipi_dsi_unbind(struct dw_mipi_dsi *dsi);
 void dw_mipi_dsi_set_slave(struct dw_mipi_dsi *dsi, struct dw_mipi_dsi *slave);
 struct drm_connector *dw_mipi_dsi_get_connector(struct dw_mipi_dsi *dsi);
 
+#if IS_REACHABLE(CONFIG_DRM_DW_MIPI_DSI)
+bool dw_mipi_dsi_needs_checked_prepare(struct drm_bridge *bridge);
+int dw_mipi_dsi_output_is_off(struct drm_bridge *bridge);
+int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge, const struct drm_display_mode *mode);
+int dw_mipi_dsi_blank_before_prepare(struct drm_bridge *bridge);
+void dw_mipi_dsi_abort_before_crtc(struct drm_bridge *bridge, int error);
+int dw_mipi_dsi_prepare_before_crtc(struct drm_bridge *bridge,
+				 struct drm_atomic_state *state);
+#else
+static inline int dw_mipi_dsi_adopt_loader(struct drm_bridge *b,const struct drm_display_mode *m)
+{return -1;}
+static inline int dw_mipi_dsi_output_is_off(struct drm_bridge *b){return 0;}
+static inline bool dw_mipi_dsi_needs_checked_prepare(struct drm_bridge *bridge)
+{
+	return false;
+}
+static inline void dw_mipi_dsi_abort_before_crtc(struct drm_bridge *bridge, int error)
+{
+}
+static inline int dw_mipi_dsi_blank_before_prepare(struct drm_bridge *bridge)
+{
+	return 0;
+}
+static inline int dw_mipi_dsi_prepare_before_crtc(struct drm_bridge *bridge,
+					       struct drm_atomic_state *state)
+{
+	return 0;
+}
+#endif
 #endif /* __DW_MIPI_DSI__ */

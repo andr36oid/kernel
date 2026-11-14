@@ -23,6 +23,9 @@
 #include <linux/sort.h>
 
 #include <drm/drm.h>
+#include <drm/rockchip_panel_safety.h>
+#include <linux/rockchip_logo_handoff.h>
+#include <drm/a36-logo-proof.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_uapi.h>
 #include <drm/drm_crtc.h>
@@ -229,6 +232,9 @@ struct vop {
 	bool is_iommu_enabled;
 	bool is_iommu_needed;
 	bool is_enabled;
+	bool panel_stopped;
+	bool panel_stop_failed;
+	struct rockchip_panel_safe_state panel_safe;
 	bool support_multi_area;
 
 	bool aclk_rate_reset;
@@ -525,6 +531,9 @@ static void vop_load_csc_table(struct vop *vop, u32 offset, const u32 *table)
 
 static inline void vop_cfg_done(struct vop *vop)
 {
+	if (READ_ONCE(vop->panel_safe.error))
+		return;
+
 	VOP_CTRL_SET(vop, cfg_done, 1);
 }
 
@@ -585,7 +594,7 @@ static inline uint32_t vop_read_lut(struct vop *vop, uint32_t offset)
 	return readl(vop->lut_regs + offset);
 }
 
-static bool has_rb_swapped(uint32_t version, uint32_t format)
+static bool has_rb_swapped(uint32_t version, uint32_t format, bool logo_fb)
 {
 	switch (format) {
 	case DRM_FORMAT_XBGR8888:
@@ -599,8 +608,14 @@ static bool has_rb_swapped(uint32_t version, uint32_t format)
 	 */
 	case DRM_FORMAT_RGB888:
 		/* dArkOSen: PX30 VOP 2.6 treats rgb888 as bgr888 (4.4 behaviour) */
+		/* The classic loader hands off its BGR-byte BMP framebuffer with
+		 * rb_swap=0 on PX30 VOP 2.6. Preserve that interpretation only
+		 * for the private imported-logo framebuffer; Android buffers keep
+		 * the existing userspace RGB888 convention.
+		 */
 		return VOP_MAJOR(version) == 3 ||
-		       (VOP_MAJOR(version) == 2 && VOP_MINOR(version) == 6);
+		       (!logo_fb && VOP_MAJOR(version) == 2 &&
+		        VOP_MINOR(version) == 6);
 	case DRM_FORMAT_BGR888:
 		return VOP_MAJOR(version) != 3 &&
 		       !(VOP_MAJOR(version) == 2 && VOP_MINOR(version) == 6);
@@ -1656,15 +1671,17 @@ static ssize_t color_lut_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(color_lut);
 
-static void vop_power_enable(struct drm_crtc *crtc)
+static int vop_power_enable(struct drm_crtc *crtc)
 {
 	struct vop *vop = to_vop(crtc);
 	int ret;
 
+	if (vop->is_enabled)
+		return 0;
 	ret = clk_prepare_enable(vop->hclk);
 	if (ret < 0) {
 		dev_err(vop->dev, "failed to enable hclk - %d\n", ret);
-		return;
+		return ret;
 	}
 
 	ret = clk_prepare_enable(vop->dclk);
@@ -1682,7 +1699,8 @@ static void vop_power_enable(struct drm_crtc *crtc)
 	ret = pm_runtime_get_sync(vop->dev);
 	if (ret < 0) {
 		dev_err(vop->dev, "failed to get pm runtime: %d\n", ret);
-		return;
+		pm_runtime_put_noidle(vop->dev);
+		goto err_disable_aclk;
 	}
 
 	memcpy(vop->regsbak, vop->regs, vop->len);
@@ -1699,12 +1717,81 @@ static void vop_power_enable(struct drm_crtc *crtc)
 
 	vop->is_enabled = true;
 
-	return;
+	return 0;
 
+err_disable_aclk:
+	clk_disable_unprepare(vop->aclk);
 err_disable_dclk:
 	clk_disable_unprepare(vop->dclk);
 err_disable_hclk:
 	clk_disable_unprepare(vop->hclk);
+	return ret;
+}
+
+/* No panel reset or PHY reprogramming until hardware acknowledges standby.
+ * Keep clocks/PM held on a timeout: cutting an active VOP's bus can deadlock.
+ */
+static int vop_panel_quiesce(struct drm_crtc *crtc)
+{
+	struct vop *vop = to_vop(crtc);
+	unsigned long done;
+	int ret;
+
+	if (READ_ONCE(vop->panel_safe.error))
+		return vop->panel_safe.error;
+	vop_lock(vop);
+	ret = vop_power_enable(crtc);
+	if (ret)
+		goto out;
+	/* A previous acknowledged stop remains stopped over clock-off. Reapply
+	 * standby before any other programming when clocks are restored.
+	 */
+	if (vop->panel_stopped) {
+		VOP_CTRL_SET(vop, standby, 1);
+		goto out;
+	}
+	VOP_CTRL_SET(vop, dsp_blank, 1);
+	VOP_CTRL_SET(vop, dsp_black, 1);
+	if (rockchip_drm_guarded_output_off(crtc)) {
+		VOP_CTRL_SET(vop, standby, 1);
+		vop_cfg_done(vop);
+		vop->panel_stopped = true;
+		vop->panel_stop_failed = false;
+		dev_info(vop->dev, "PANEL-SAFE: cold DSI physically off/reset; VOP held stopped\n");
+		goto out;
+	}
+	reinit_completion(&vop->dsp_hold_completion);
+	vop_dsp_hold_valid_irq_enable(vop);
+	VOP_CTRL_SET(vop, standby, 1);
+	vop_cfg_done(vop);
+	done = wait_for_completion_timeout(&vop->dsp_hold_completion,
+					   msecs_to_jiffies(250));
+	vop_dsp_hold_valid_irq_disable(vop);
+	if (!done) {
+		ret = -ETIMEDOUT;
+		vop->panel_stop_failed = true;
+		dev_err(vop->dev, "PANEL-SAFE: standby not acknowledged; no panel reset/scanout enable\n");
+		goto out;
+	}
+	vop->panel_stop_failed = false;
+	vop->panel_stopped = true;
+	dev_info(vop->dev, "PANEL-SAFE: VOP stopped before panel reset/init\n");
+ out:
+	if (ret) {
+		rockchip_panel_safe_latch(&vop->panel_safe, RK_PANEL_SAFE_STOP, ret);
+		to_rockchip_crtc_state(crtc->state)->panel_prepare_error = ret;
+	}
+	vop_unlock(vop);
+	return ret;
+}
+
+static void vop_panel_fail(struct drm_crtc *crtc, int error)
+{
+	struct vop *vop = to_vop(crtc);
+
+	rockchip_panel_safe_latch(&vop->panel_safe, RK_PANEL_SAFE_PREPARE, error);
+	to_rockchip_crtc_state(crtc->state)->panel_prepare_error = error;
+	crtc->state->no_vblank = true;
 }
 
 static void vop_initial(struct drm_crtc *crtc)
@@ -1770,6 +1857,8 @@ static void vop_crtc_atomic_disable(struct drm_crtc *crtc,
 	unsigned long flags;
 
 	WARN_ON(vop->event);
+	if (!vop->is_enabled || vop->panel_stop_failed)
+		goto out;
 
 	if (crtc->state->self_refresh_active) {
 		vop_crtc_atomic_disable_for_psr(crtc, old_state);
@@ -1815,11 +1904,18 @@ static void vop_crtc_atomic_disable(struct drm_crtc *crtc,
 		vrefresh = 1;
 	hold_time = DIV_ROUND_UP(1000, vrefresh) * 10;
 
-	WARN_ON(!wait_for_completion_timeout(&vop->dsp_hold_completion,
-					     msecs_to_jiffies(hold_time)));
+	if (!vop->panel_stopped &&
+	    !wait_for_completion_timeout(&vop->dsp_hold_completion,
+					 msecs_to_jiffies(hold_time))) {
+		vop_dsp_hold_valid_irq_disable(vop);
+		vop->panel_stop_failed = true;
+		vop_unlock(vop);
+		goto out;
+	}
 
 	vop_dsp_hold_valid_irq_disable(vop);
 
+	vop->panel_stopped = true;
 	vop->is_enabled = false;
 	if (vop->is_iommu_enabled) {
 		/*
@@ -2017,7 +2113,8 @@ static void vop_plane_atomic_disable(struct drm_plane *plane,
 	struct vop_win *win = to_vop_win(plane);
 	struct vop *vop = to_vop(old_state->crtc);
 
-	if (!old_state->crtc)
+	if (!old_state->crtc || !vop->is_enabled ||
+	    to_rockchip_crtc_state(old_state->crtc->state)->panel_prepare_error)
 		return;
 
 	rockchip_drm_dbg_thread_info(vop->dev, VOP_DEBUG_PLANE, "disable win%d-area%d",
@@ -2131,6 +2228,8 @@ static void vop_plane_atomic_update(struct drm_plane *plane,
 	if (WARN_ON(!crtc))
 		return;
 
+	if (to_rockchip_crtc_state(crtc->state)->panel_prepare_error)
+		return;
 	if (WARN_ON(!vop->is_enabled))
 		return;
 
@@ -2210,7 +2309,8 @@ static void vop_plane_atomic_update(struct drm_plane *plane,
 	VOP_WIN_SET(vop, win, dsp_info, dsp_info);
 	VOP_WIN_SET(vop, win, dsp_st, dsp_st);
 
-	rb_swap = has_rb_swapped(vop->data->version, fb->format->format);
+	rb_swap = has_rb_swapped(vop->data->version, fb->format->format,
+			 fb->flags & ROCKCHIP_DRM_MODE_LOGO_FB);
 	VOP_WIN_SET(vop, win, rb_swap, rb_swap);
 
 	global_alpha_en = (vop_plane_state->global_alpha == 0xff) ? 0 : 1;
@@ -2640,6 +2740,40 @@ static void vop_crtc_cancel_pending_vblank(struct drm_crtc *crtc,
 	spin_unlock_irqrestore(&drm->event_lock, flags);
 }
 
+static int vop_panel_frame_ready(struct drm_crtc *crtc)
+{
+ u64 count;long done;int ret;
+ ret=drm_crtc_vblank_get(crtc);if(ret)return ret;
+ count=drm_crtc_vblank_count(crtc);
+ done=wait_event_timeout(*drm_crtc_vblank_waitqueue(crtc),
+      drm_crtc_vblank_count(crtc)!=count,msecs_to_jiffies(100));
+ drm_crtc_vblank_put(crtc);
+ if(!done)return -ETIMEDOUT;
+ return 0;
+}
+static int vop_loader_validate(struct drm_crtc *crtc)
+{
+ struct vop *vop=to_vop(crtc);u8 p[A36_LOGO_BYTES];int ret,i,found=0;
+ u32 address;u64 base;
+ if(vop->data->soc_id!=0x3326 || vop->data->vop_id!=0 ||
+    rockchip_logo_copy_proof(p))return -EOPNOTSUPP;
+ vop_lock(vop);ret=vop_power_enable(crtc);vop_unlock(vop);if(ret)return ret;
+ ret=rockchip_logo_check_registers(0,7);if(ret)return ret;
+ if(VOP_CTRL_GET(vop,standby) || !VOP_CTRL_GET(vop,mipi_en))return -EINVAL;
+ base=((u64)a36_logo_get(p,A36_L_BASE_HI)<<32)|a36_logo_get(p,A36_L_BASE_LO);
+ base+=a36_logo_get(p,A36_L_OFFSET);if(base>U32_MAX)return -ERANGE;
+ for(i=0;i<vop->num_wins;i++) {
+  struct vop_win *win=&vop->win[i];
+  if(!vop_read_reg(vop,win->offset,&VOP_WIN_NAME(win,enable)))continue;
+  address=vop_read_reg(vop,win->offset,&VOP_WIN_NAME(win,yrgb_mst));
+  if(address!=(u32)base)return -EINVAL;
+  found++;
+ }
+ if(found!=1)return -EINVAL;
+ drm_crtc_vblank_on(crtc);
+ return vop_panel_frame_ready(crtc);
+}
+
 static int vop_crtc_loader_protect(struct drm_crtc *crtc, bool on, void *data)
 {
 	struct rockchip_drm_private *private = crtc->dev->dev_private;
@@ -2666,7 +2800,8 @@ static int vop_crtc_loader_protect(struct drm_crtc *crtc, bool on, void *data)
 		}
 
 		rockchip_set_system_status(sys_status);
-		vop_initial(crtc);
+		if (!rockchip_logo_output_ready())
+			vop_initial(crtc);
 		drm_crtc_vblank_on(crtc);
 		vop->loader_protect = true;
 	} else {
@@ -3202,6 +3337,10 @@ static void vop_crtc_te_handler(struct drm_crtc *crtc)
 
 static const struct rockchip_crtc_funcs private_crtc_funcs = {
 	.loader_protect = vop_crtc_loader_protect,
+	.loader_validate = vop_loader_validate,
+	.panel_frame_ready = vop_panel_frame_ready,
+	.panel_quiesce = vop_panel_quiesce,
+	.panel_fail = vop_panel_fail,
 	.cancel_pending_vblank = vop_crtc_cancel_pending_vblank,
 	.debugfs_init = vop_crtc_debugfs_init,
 	.debugfs_dump = vop_crtc_debugfs_dump,
@@ -3407,6 +3546,70 @@ static void vop_mcu_mode(struct drm_crtc *crtc)
 	VOP_CTRL_SET(vop, mcu_rw_pend, vop->mcu_timing.mcu_rw_pend);
 }
 
+struct vop_panel_prepare_data {
+	struct drm_crtc *crtc;
+	struct drm_atomic_state *state;
+};
+
+static int vop_panel_blank_op(void *data)
+{
+	struct vop_panel_prepare_data *d = data;
+
+	return rockchip_drm_prepare_panel(d->crtc, d->state, true);
+}
+
+static int vop_panel_stop_op(void *data)
+{
+	struct vop_panel_prepare_data *d = data;
+
+	return vop_panel_quiesce(d->crtc);
+}
+
+static int vop_panel_clock_op(void *data)
+{
+	struct vop_panel_prepare_data *d = data;
+	struct vop *vop = to_vop(d->crtc);
+	unsigned long rate = d->crtc->state->adjusted_mode.crtc_clock * 1000UL;
+	int ret;
+
+	if (!rate)
+		return -EINVAL;
+	if (vop->dclk_source && vop->pll && vop->pll->pll) {
+		ret = clk_set_parent(vop->dclk_source, vop->pll->pll);
+		if (ret)
+			return ret;
+	}
+	ret = rockchip_drm_dclk_set_rate(vop->version, vop->dclk, rate);
+	if (ret)
+		return ret;
+	if (DIV_ROUND_UP(clk_get_rate(vop->dclk), 1000) !=
+	    d->crtc->state->adjusted_mode.crtc_clock)
+		return -ERANGE;
+	return 0;
+}
+
+static int vop_panel_prepare_op(void *data)
+{
+	struct vop_panel_prepare_data *d = data;
+
+	return rockchip_drm_prepare_panel(d->crtc, d->state, false);
+}
+
+static void vop_panel_abort_op(void *data, int error)
+{
+	struct vop_panel_prepare_data *d = data;
+
+	rockchip_drm_abort_panel(d->crtc, error);
+}
+
+static const struct rockchip_panel_safe_ops vop_panel_safe_ops = {
+	.blank = vop_panel_blank_op,
+	.stop = vop_panel_stop_op,
+	.clock = vop_panel_clock_op,
+	.prepare = vop_panel_prepare_op,
+	.abort = vop_panel_abort_op,
+};
+
 static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 				   struct drm_crtc_state *old_state)
 {
@@ -3431,8 +3634,14 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 	bool interlaced = !!(adjusted_mode->flags & DRM_MODE_FLAG_INTERLACE);
 	int for_ddr_freq = 0;
 	bool dclk_inv, yc_swap = false;
+	int ret;
+	bool guarded = rockchip_drm_has_guarded_panel(crtc);
+	struct vop_panel_prepare_data prepare_data = {
+		.crtc = crtc,
+		.state = old_state ? old_state->state : crtc->state->state,
+	};
 
-	if (old_state && old_state->self_refresh_active) {
+	if (!guarded && old_state && old_state->self_refresh_active) {
 		if (vop->aclk_rate_reset)
 			clk_set_rate(vop->aclk, vop->aclk_rate);
 		vop->aclk_rate_reset = false;
@@ -3442,6 +3651,23 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 		return;
 	}
 
+	if (guarded) {
+		ret = rockchip_panel_safe_run(&vop->panel_safe,
+					    &vop_panel_safe_ops, &prepare_data);
+		if (ret) {
+			s->panel_prepare_error = ret;
+			crtc->state->no_vblank = true;
+			if (!vop->panel_safe.reported) {
+				dev_err(vop->dev, "PANEL-SAFE: step=%s errno=%d latched; output stays off\n",
+					rockchip_panel_safe_step_name(vop->panel_safe.step), ret);
+				vop->panel_safe.reported = true;
+			}
+			return;
+		}
+		s->panel_prepare_error = 0;
+		crtc->state->no_vblank = false;
+		dev_info(vop->dev, "PANEL-SAFE: init verified before VOP timing/scanout\n");
+	}
 	rockchip_set_system_status(sys_status);
 	vop_lock(vop);
 	DRM_DEV_INFO(vop->dev, "Update mode to %dx%d%s%d, type: %d\n",
@@ -3449,7 +3675,10 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 		     drm_mode_vrefresh(adjusted_mode), s->output_type);
 	vop_initial(crtc);
 	vop_disable_allwin(vop);
-	VOP_CTRL_SET(vop, standby, 0);
+	if (!guarded) {
+		VOP_CTRL_SET(vop, standby, 0);
+		vop->panel_stopped = false;
+	}
 	s->mode_update = vop_crtc_mode_update(crtc);
 	if (s->mode_update)
 		vop_disable_all_planes(vop);
@@ -3474,7 +3703,7 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 		   0 : BIT(VSYNC_POSITIVE);
 	VOP_CTRL_SET(vop, pin_pol, val);
 
-	if (vop->dclk_source && vop->pll && vop->pll->pll) {
+	if (!guarded && vop->dclk_source && vop->pll && vop->pll->pll) {
 		if (clk_set_parent(vop->dclk_source, vop->pll->pll))
 			DRM_DEV_ERROR(vop->dev,
 				      "failed to set dclk's parents\n");
@@ -3593,9 +3822,14 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	VOP_CTRL_SET(vop, win_csc_mode_sel, 1);
 
-	rockchip_drm_dclk_set_rate(vop->version, vop->dclk,
-				   adjusted_mode->crtc_clock * 1000);
+	if (!guarded)
+		rockchip_drm_dclk_set_rate(vop->version, vop->dclk,
+					   adjusted_mode->crtc_clock * 1000);
 
+	if (guarded) {
+		VOP_CTRL_SET(vop, standby, 0);
+		vop->panel_stopped = false;
+	}
 	vop_cfg_done(vop);
 
 	drm_crtc_vblank_on(crtc);
@@ -4160,6 +4394,9 @@ static void vop_crtc_atomic_flush(struct drm_crtc *crtc,
 	unsigned long flags;
 	struct rockchip_crtc_state *s =
 		to_rockchip_crtc_state(crtc->state);
+
+	if (s->panel_prepare_error)
+		return;
 
 #if defined(CONFIG_ROCKCHIP_DRM_DEBUG)
 	if (vop->rockchip_crtc.vop_dump_status == DUMP_KEEP ||

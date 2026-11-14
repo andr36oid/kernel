@@ -139,6 +139,10 @@ static int rockchip_px30_drm_dclk_set_rate(struct clk *dclk, unsigned long rate)
 	unsigned long pll_rate;
 	const char *name;
 	int div = 0;
+	int ret;
+
+	if (!rate)
+		return -EINVAL;
 
 	hw = __clk_get_hw(dclk);
 	if (!hw)
@@ -160,23 +164,25 @@ static int rockchip_px30_drm_dclk_set_rate(struct clk *dclk, unsigned long rate)
 	if (!strcmp(name, "cpll")) {
 		pll_rate = clk_hw_get_rate(p_hw);
 		if (pll_rate >= VOP2_PLL_LIMIT_FREQ && pll_rate % rate == 0) {
-			clk_set_rate(dclk, rate);
+			ret = clk_set_rate(dclk, rate);
 		} else {
 			div = DIV_ROUND_UP(VOP2_PLL_LIMIT_FREQ, rate);
 			if (div % 2)
 				div += 1;
-			clk_set_rate(p_hw->clk, rate * div);
-			clk_set_rate(dclk, rate);
+			ret = clk_set_rate(p_hw->clk, rate * div);
+			if (ret)
+				return ret;
+			ret = clk_set_rate(dclk, rate);
 		}
 	} else {
-		clk_set_rate(dclk, rate);
+		ret = clk_set_rate(dclk, rate);
 	}
 
 	pr_debug("%s:request rate = %lu, %s = %lu, %s = %lu\n", __func__, rate,
 		 clk_hw_get_name(hw), clk_hw_get_rate(hw),
 		 clk_hw_get_name(p_hw), clk_hw_get_rate(p_hw));
 
-	return 0;
+	return ret;
 }
 
 /*

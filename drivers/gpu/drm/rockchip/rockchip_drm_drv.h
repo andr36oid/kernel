@@ -214,6 +214,7 @@ struct rockchip_drm_modes_info {
 };
 
 struct rockchip_drm_sub_dev {
+	bool guarded_panel_init;
 	struct list_head list;
 	struct drm_connector *connector;
 	struct device_node *of_node;
@@ -320,6 +321,7 @@ struct post_csc {
 };
 
 struct rockchip_crtc_state {
+	int panel_prepare_error;
 	struct drm_crtc_state base;
 	int vp_id;
 	int output_type;
@@ -424,6 +426,7 @@ struct rockchip_logo {
 	phys_addr_t start;
 	phys_addr_t size;
 	int count;
+	bool quarantined; /* Unacknowledged stop: never recycle live pixels. */
 };
 
 struct rockchip_mcu_timing {
@@ -551,6 +554,10 @@ struct next_hdr_sink_data {
  * @wait_vact_end: wait the last active line.
  */
 struct rockchip_crtc_funcs {
+	int (*panel_frame_ready)(struct drm_crtc *crtc);
+	int (*loader_validate)(struct drm_crtc *crtc);
+	int (*panel_quiesce)(struct drm_crtc *crtc);
+	void (*panel_fail)(struct drm_crtc *crtc, int error);
 	int (*loader_protect)(struct drm_crtc *crtc, bool on, void *data);
 	int (*enable_vblank)(struct drm_crtc *crtc);
 	void (*disable_vblank)(struct drm_crtc *crtc);
@@ -745,4 +752,10 @@ extern struct platform_driver rockchip_tve_driver;
 extern struct platform_driver dw_dp_driver;
 extern struct platform_driver vconn_platform_driver;
 extern struct platform_driver vvop_platform_driver;
+bool rockchip_drm_has_guarded_panel(struct drm_crtc *crtc);
+void rockchip_drm_abort_panel(struct drm_crtc *crtc, int error);
+int rockchip_drm_prepare_panel(struct drm_crtc *crtc,
+			      struct drm_atomic_state *state, bool blank_only);
 #endif /* _ROCKCHIP_DRM_DRV_H_ */
+
+bool rockchip_drm_guarded_output_off(struct drm_crtc *crtc);

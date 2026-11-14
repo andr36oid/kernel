@@ -1,3 +1,4 @@
+#include <linux/rockchip_logo_handoff.h>
 /*
  * Copyright (C) 2013, NVIDIA Corporation.  All rights reserved.
  *
@@ -144,6 +145,10 @@ struct panel_simple {
 	bool prepared;
 	bool enabled;
 	bool loader_protected;
+	bool preserve_mode_once;
+	bool supply_prepared;
+	bool safety_cleanup_attempted;
+	int init_error;
 	bool power_invert;
 	bool no_hpd;
 
@@ -161,6 +166,8 @@ struct panel_simple {
 	struct drm_dsc_picture_parameter_set *pps;
 	enum drm_panel_orientation orientation;
 };
+
+static const struct drm_panel_funcs panel_simple_funcs;
 
 static inline void panel_simple_msleep(unsigned int msecs)
 {
@@ -191,7 +198,7 @@ static int panel_simple_parse_cmd_seq(struct device *dev,
 	d = buf;
 	len = length;
 	cnt = 0;
-	while (len > sizeof(*header)) {
+	while (len >= sizeof(*header)) {
 		header = (struct panel_cmd_header *)d;
 
 		d += sizeof(*header);
@@ -238,6 +245,7 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 	struct mipi_dsi_device *dsi = panel->dsi;
 	unsigned int i;
 	int err;
+	bool data_write;
 
 	if (!IS_ENABLED(CONFIG_DRM_MIPI_DSI))
 		return -EINVAL;
@@ -247,8 +255,12 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 	for (i = 0; i < seq->cmd_cnt; i++) {
 		struct panel_cmd_desc *cmd = &seq->cmds[i];
 
+		data_write = true;
 		switch (cmd->header.data_type) {
 		case MIPI_DSI_COMPRESSION_MODE:
+			if (cmd->header.payload_length != 1)
+				return -EINVAL;
+			data_write = false;
 			err = mipi_dsi_compression_mode(dsi, cmd->payload[0]);
 			break;
 		case MIPI_DSI_GENERIC_SHORT_WRITE_0_PARAM:
@@ -265,6 +277,9 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 							cmd->header.payload_length);
 			break;
 		case MIPI_DSI_PICTURE_PARAMETER_SET:
+			if (cmd->header.payload_length != sizeof(*panel->pps))
+				return -EINVAL;
+			data_write = false;
 			if (!panel->pps) {
 				panel->pps = devm_kzalloc(dev, sizeof(*panel->pps),
 							  GFP_KERNEL);
@@ -280,8 +295,12 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 			return -EINVAL;
 		}
 
-		if (err < 0)
-			dev_err(dev, "failed to write dcs cmd: %d\n", err);
+		if (err < 0 || (data_write && err != cmd->header.payload_length)) {
+			if (err >= 0)
+				err = -EIO;
+			dev_err(dev, "PANEL-SAFE: init command %u failed: %d\n", i, err);
+			return err;
+		}
 
 		if (cmd->header.delay)
 			panel_simple_msleep(cmd->header.delay);
@@ -428,42 +447,73 @@ static int panel_simple_get_non_edid_modes(struct panel_simple *panel,
 
 static int panel_simple_regulator_enable(struct panel_simple *p)
 {
-	int err;
+	int err = 0;
 
+	if (p->supply_prepared)
+		return 0;
 	if (p->power_invert) {
-		if (regulator_is_enabled(p->supply) > 0)
-			regulator_disable(p->supply);
-	} else {
-		err = regulator_enable(p->supply);
+		err = regulator_is_enabled(p->supply);
 		if (err < 0)
 			return err;
+		if (err > 0)
+			err = regulator_disable(p->supply);
+	} else {
+		err = regulator_enable(p->supply);
 	}
-
+	if (err < 0)
+		return err;
+	p->supply_prepared = true;
 	return 0;
 }
 
 static int panel_simple_regulator_disable(struct panel_simple *p)
 {
-	int err;
+	int err = 0;
 
+	if (!p->supply_prepared)
+		return 0;
 	if (p->power_invert) {
-		if (!regulator_is_enabled(p->supply)) {
+		err = regulator_is_enabled(p->supply);
+		if (err < 0)
+			return err;
+		if (!err)
 			err = regulator_enable(p->supply);
-			if (err < 0)
-				return err;
-		}
+		else
+			err = 0;
 	} else {
-		regulator_disable(p->supply);
+		err = regulator_disable(p->supply);
 	}
-
-	return 0;
+	if (!err)
+		p->supply_prepared = false;
+	return err;
 }
+
+int panel_simple_verify_loader(struct drm_panel *panel)
+{
+ struct panel_simple *p=to_panel_simple(panel);u8 mode=0;unsigned long flags;int ret;
+ if(!p->dsi || p->power_invert || p->init_error || p->prepared || p->enabled)
+  return -EOPNOTSUPP;
+ if(regulator_is_enabled(p->supply)<=0)return -EIO;
+ if(p->reset_gpio && gpiod_get_value_cansleep(p->reset_gpio)!=0)return -EIO;
+ if(p->enable_gpio && gpiod_get_value_cansleep(p->enable_gpio)!=1)return -EIO;
+ /* Use an in-video DCS read: never run host reset or switch VIDEO_MODE.
+  * Caller saves/restores host LP-command controls and validates readback.
+  */
+ flags=p->dsi->mode_flags;p->dsi->mode_flags&=~MIPI_DSI_MODE_LPM;
+ ret=mipi_dsi_dcs_read(p->dsi,0x0a,&mode,1);p->dsi->mode_flags=flags;
+ if(ret<0)return ret;
+ if(ret!=1)return -EIO;
+ return (mode&0x1c)==0x1c ? 0:-EIO;
+}
+EXPORT_SYMBOL_GPL(panel_simple_verify_loader);
 
 int panel_simple_loader_protect(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
 	int err;
 
+	if (p->init_error)
+		return p->init_error;
 	/* Do not acquire a second supply reference for an existing state. */
 	if (p->prepared)
 		return 0;
@@ -477,6 +527,7 @@ int panel_simple_loader_protect(struct drm_panel *panel)
 	p->prepared = true;
 	p->enabled = true;
 	p->loader_protected = true;
+	p->preserve_mode_once = true;
 	dev_dbg(panel->dev, "loader acquired prepared=1 enabled=1\n");
 
 	return 0;
@@ -511,6 +562,7 @@ EXPORT_SYMBOL(panel_simple_loader_unprotect);
 static int panel_simple_disable(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
+	rockchip_logo_reject();
 
 	if (!p->enabled)
 		return 0;
@@ -526,34 +578,47 @@ static int panel_simple_disable(struct drm_panel *panel)
 static int panel_simple_unprepare(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
+	const char *step = "exit-sequence";
+	int error = 0, ret;
 
+	if (p->init_error)
+		return p->init_error;
 	if (!p->prepared)
 		return 0;
-
 	if (p->desc->exit_seq) {
-		if (p->desc->cmd_type == CMD_TYPE_SPI) {
-			if (panel_simple_xfer_spi_cmd_seq(p, p->desc->exit_seq)) {
-				dev_err(panel->dev, "failed to send exit spi cmds seq\n");
-				return -EINVAL;
-			}
-		} else {
-			if (p->dsi)
-				panel_simple_xfer_dsi_cmd_seq(p, p->desc->exit_seq);
-		}
+		if (p->desc->cmd_type == CMD_TYPE_SPI)
+			error = panel_simple_xfer_spi_cmd_seq(p, p->desc->exit_seq);
+		else if (p->dsi)
+			error = panel_simple_xfer_dsi_cmd_seq(p, p->desc->exit_seq);
+		else
+			error = -EOPNOTSUPP;
 	}
-
-	gpiod_direction_output(p->reset_gpio, 1);
-	gpiod_direction_output(p->enable_gpio, 0);
-
-	panel_simple_regulator_disable(p);
-
+	ret = gpiod_direction_output(p->reset_gpio, 1);
+	if (ret && !error) {
+		error = ret;
+		step = "reset-assert-off";
+	}
+	ret = gpiod_direction_output(p->enable_gpio, 0);
+	if (ret && !error) {
+		error = ret;
+		step = "enable-off";
+	}
+	ret = panel_simple_regulator_disable(p);
+	if (ret && !error) {
+		error = ret;
+		step = "supply-off";
+	}
 	if (p->desc->delay.unprepare)
 		panel_simple_msleep(p->desc->delay.unprepare);
-
 	p->prepared = false;
+	p->enabled = false;
 	p->loader_protected = false;
-
-	return 0;
+	if (error) {
+		p->init_error = error;
+		p->safety_cleanup_attempted = true;
+		dev_err(panel->dev, "PANEL-SAFE: step=%s errno=%d latched after shutdown\n", step, error);
+	}
+	return error;
 }
 
 static int panel_simple_get_hpd_gpio(struct device *dev,
@@ -587,21 +652,25 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	unsigned int delay;
 	int err;
 	int hpd_asserted;
+	const char *step = "supply-enable";
 
 	dev_dbg(panel->dev, "prepare prepared=%u enabled=%u loader=%u\n",
 		 p->prepared, p->enabled, p->loader_protected);
+	if (p->init_error)
+		return p->init_error;
 	if (p->prepared)
 		return 0;
 
 	dev_dbg(panel->dev, "panel supply enable begin\n");
 	err = panel_simple_regulator_enable(p);
-	dev_dbg(panel->dev, "panel supply enable end ret=%d\n", err);
-	if (err < 0) {
-		dev_err(panel->dev, "failed to enable supply: %d\n", err);
-		return err;
-	}
+	dev_info(panel->dev, "DISPLAY-DIAG: panel supply enable end ret=%d\n", err);
+	if (err < 0)
+		goto power_off;
 
-	gpiod_direction_output(p->enable_gpio, 1);
+	step = "enable-gpio";
+	err = gpiod_direction_output(p->enable_gpio, 1);
+	if (err)
+		goto power_off;
 
 	delay = p->desc->delay.prepare;
 	if (p->no_hpd)
@@ -609,11 +678,12 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	if (delay)
 		panel_simple_msleep(delay);
 
+	step = "hpd-wait";
 	if (p->hpd_gpio) {
 		if (IS_ERR(p->hpd_gpio)) {
 			err = panel_simple_get_hpd_gpio(panel->dev, p, false);
 			if (err)
-				return err;
+				goto power_off;
 		}
 
 		err = readx_poll_timeout(gpiod_get_value_cansleep, p->hpd_gpio,
@@ -625,33 +695,45 @@ static int panel_simple_prepare(struct drm_panel *panel)
 		if (err) {
 			dev_err(panel->dev,
 				"error waiting for hpd GPIO: %d\n", err);
-			return err;
+			goto power_off;
 		}
 	}
 
-	gpiod_direction_output(p->reset_gpio, 1);
-	dev_dbg(panel->dev, "reset asserted\n");
+	step = "reset-assert";
+	err = gpiod_direction_output(p->reset_gpio, 1);
+	if (err)
+		goto power_off;
+	dev_info(panel->dev, "DISPLAY-HANDOFF: reset asserted\n");
 
 	if (p->desc->delay.reset)
 		panel_simple_msleep(p->desc->delay.reset);
 
-	gpiod_direction_output(p->reset_gpio, 0);
-	dev_dbg(panel->dev, "reset released\n");
+	step = "reset-release";
+	err = gpiod_direction_output(p->reset_gpio, 0);
+	if (err)
+		goto power_off;
+	dev_info(panel->dev, "DISPLAY-HANDOFF: reset released\n");
 
 	if (p->desc->delay.init)
 		panel_simple_msleep(p->desc->delay.init);
 
+	step = "init-sequence";
 	if (p->desc->init_seq) {
 		if (p->desc->cmd_type == CMD_TYPE_SPI) {
-			if (panel_simple_xfer_spi_cmd_seq(p, p->desc->init_seq)) {
-				dev_err(panel->dev, "failed to send init spi cmds seq\n");
-				return -EINVAL;
-			}
+			err = panel_simple_xfer_spi_cmd_seq(p, p->desc->init_seq);
+			if (err)
+				goto power_off;
 		} else {
+			if (!p->dsi) {
+				err = -EOPNOTSUPP;
+				goto power_off;
+			}
 			if (p->dsi) {
-				dev_dbg(panel->dev, "panel DSI init sequence begin\n");
-				panel_simple_xfer_dsi_cmd_seq(p, p->desc->init_seq);
-				dev_dbg(panel->dev, "panel DSI init sequence end\n");
+				dev_info(panel->dev, "DISPLAY-DIAG: panel DSI init sequence begin\n");
+				err = panel_simple_xfer_dsi_cmd_seq(p, p->desc->init_seq);
+				if (err)
+					goto power_off;
+				dev_info(panel->dev, "DISPLAY-DIAG: panel DSI init sequence end\n");
 			}
 		}
 	}
@@ -660,12 +742,19 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	dev_dbg(panel->dev, "prepare complete\n");
 
 	return 0;
+
+power_off:
+	return panel_simple_safety_abort(panel, err, step);
 }
 
 static int panel_simple_enable(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
 
+	if (p->init_error)
+		return p->init_error;
+	if (!p->prepared)
+		return -EPIPE;
 	if (p->enabled)
 		return 0;
 
@@ -677,6 +766,41 @@ static int panel_simple_enable(struct drm_panel *panel)
 
 	return 0;
 }
+
+int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *step)
+{
+	struct panel_simple *p;
+	int ret;
+
+	if (!panel || panel->funcs != &panel_simple_funcs)
+		return error ? error : -EOPNOTSUPP;
+	p = to_panel_simple(panel);
+	if (!p->init_error) {
+		p->init_error = error ? error : -EIO;
+		dev_err(panel->dev, "PANEL-SAFE: step=%s errno=%d latched; reset/off requested\n",
+			step, p->init_error);
+	}
+	if (p->safety_cleanup_attempted)
+		return p->init_error;
+	p->safety_cleanup_attempted = true;
+	ret = backlight_disable(panel->backlight);
+	if (ret)
+		dev_err(panel->dev, "PANEL-SAFE: cleanup backlight-off failed %d; output must stay stopped\n", ret);
+	ret = gpiod_direction_output(p->reset_gpio, 1);
+	if (ret)
+		dev_err(panel->dev, "PANEL-SAFE: cleanup reset request failed %d; output must stay stopped\n", ret);
+	ret = gpiod_direction_output(p->enable_gpio, 0);
+	if (ret)
+		dev_err(panel->dev, "PANEL-SAFE: cleanup enable-off failed %d; output must stay stopped\n", ret);
+	ret = panel_simple_regulator_disable(p);
+	if (ret)
+		dev_err(panel->dev, "PANEL-SAFE: cleanup supply-off failed %d; output must stay stopped\n", ret);
+	p->prepared = false;
+	p->enabled = false;
+	p->loader_protected = false;
+	return p->init_error;
+}
+EXPORT_SYMBOL_GPL(panel_simple_safety_abort);
 
 static int panel_simple_get_modes(struct drm_panel *panel,
 				  struct drm_connector *connector)
@@ -701,6 +825,10 @@ static int panel_simple_get_modes(struct drm_panel *panel,
 	/* set up connector's "panel orientation" property */
 	drm_connector_set_panel_orientation(connector, p->orientation);
 
+	if (p->preserve_mode_once) {
+		rockchip_logo_prefer_initial_mode(connector);
+		p->preserve_mode_once = false;
+	}
 	return num;
 }
 

@@ -8,6 +8,8 @@
 #include <linux/devfreq.h>
 
 #include <drm/drm.h>
+#include <drm/drm_bridge.h>
+#include <drm/bridge/dw_mipi_dsi.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_fb_helper.h>
@@ -21,6 +23,85 @@
 #include "rockchip_drm_gem.h"
 #include "rockchip_drm_logo.h"
 
+
+bool rockchip_drm_has_guarded_panel(struct drm_crtc *crtc)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask)
+		if (dw_mipi_dsi_needs_checked_prepare(
+			    drm_bridge_chain_get_first_bridge(encoder)))
+			return true;
+	return false;
+}
+
+bool rockchip_drm_guarded_output_off(struct drm_crtc *crtc)
+{
+ struct drm_encoder *encoder;bool found=false;
+ drm_for_each_encoder(encoder,crtc->dev) {
+  struct drm_bridge *b;
+  if(!(encoder->possible_crtcs & drm_crtc_mask(crtc)))continue;
+  b=drm_bridge_chain_get_first_bridge(encoder);
+  if(!dw_mipi_dsi_needs_checked_prepare(b))continue;
+  found=true;
+  if(dw_mipi_dsi_output_is_off(b)!=1)return false;
+ }
+ return found;
+}
+
+int rockchip_drm_prepare_panel(struct drm_crtc *crtc,
+			      struct drm_atomic_state *state, bool blank_only)
+{
+	struct drm_encoder *encoder;
+	int ret;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask) {
+		struct drm_bridge *bridge = drm_bridge_chain_get_first_bridge(encoder);
+
+		if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+			continue;
+		if (blank_only)
+			ret = dw_mipi_dsi_blank_before_prepare(bridge);
+		else
+			ret = dw_mipi_dsi_prepare_before_crtc(bridge, state);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+void rockchip_drm_abort_panel(struct drm_crtc *crtc, int error)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask)
+		dw_mipi_dsi_abort_before_crtc(drm_bridge_chain_get_first_bridge(encoder), error);
+}
+
+static int rockchip_drm_checked_atomic_check(struct drm_device *dev,
+					     struct drm_atomic_state *state)
+{
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *new_state;
+	int i, ret = drm_atomic_helper_check(dev, state);
+
+	if (ret)
+		return ret;
+	for_each_new_crtc_in_state(state, crtc, new_state, i) {
+		struct drm_encoder *encoder;
+		int error = to_rockchip_crtc_state(crtc->state)->panel_prepare_error;
+		/* This checked cold-init path deliberately has no PSR shortcut. */
+		if (new_state->self_refresh_active || crtc->state->self_refresh_active) {
+			drm_for_each_encoder_mask(encoder, dev, new_state->encoder_mask)
+				if (dw_mipi_dsi_needs_checked_prepare(
+					    drm_bridge_chain_get_first_bridge(encoder)))
+					return -EOPNOTSUPP;
+		}
+		if (error && new_state->active)
+			return error;
+	}
+	return 0;
+}
 static bool is_rockchip_logo_fb(struct drm_framebuffer *fb)
 {
 	return fb->flags & ROCKCHIP_DRM_MODE_LOGO_FB ? true : false;
@@ -332,7 +413,7 @@ static void rockchip_drm_output_poll_changed(struct drm_device *dev)
 static const struct drm_mode_config_funcs rockchip_drm_mode_config_funcs = {
 	.fb_create = rockchip_fb_create,
 	.output_poll_changed = rockchip_drm_output_poll_changed,
-	.atomic_check = drm_atomic_helper_check,
+	.atomic_check = rockchip_drm_checked_atomic_check,
 	.atomic_commit = drm_atomic_helper_commit,
 };
 

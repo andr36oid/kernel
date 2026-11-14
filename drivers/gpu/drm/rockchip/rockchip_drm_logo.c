@@ -1,3 +1,4 @@
+#include <linux/rockchip_logo_handoff.h>
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
  * Copyright (c) 2021 Rockchip Electronics Co., Ltd.
@@ -17,6 +18,8 @@
 #include <drm/drm_probe_helper.h>
 
 #include "rockchip_drm_drv.h"
+#include <drm/drm_bridge.h>
+#include <drm/bridge/dw_mipi_dsi.h>
 #include "rockchip_drm_fb.h"
 #include "rockchip_drm_logo.h"
 
@@ -192,7 +195,8 @@ void rockchip_free_loader_memory(struct drm_device *drm)
 	struct rockchip_drm_private *private = drm->dev_private;
 	struct rockchip_logo *logo;
 
-	if (!private || !private->logo || --private->logo->count)
+	if (!private || !private->logo || private->logo->quarantined ||
+	    --private->logo->count)
 		return;
 
 	logo = private->logo;
@@ -356,7 +360,18 @@ get_framebuffer_by_node(struct drm_device *drm_dev, struct device_node *node)
 	}
 	bpp = val;
 
+	if (!mode_cmd.width || mode_cmd.width > 4096 ||
+	    !mode_cmd.height || mode_cmd.height > 4096 ||
+	    (bpp != 16 && bpp != 24 && bpp != 32))
+		return NULL;
 	mode_cmd.pitches[0] = ALIGN(mode_cmd.width * bpp, 32) / 8;
+	if ((u64)mode_cmd.offsets[0] >= private->logo->size ||
+	    (u64)mode_cmd.pitches[0] * mode_cmd.height >
+	    private->logo->size - mode_cmd.offsets[0]) {
+		dev_err(drm_dev->dev, "LOGO32: rejecting out-of-bounds logo pixels\n");
+		return NULL;
+	}
+
 
 	switch (bpp) {
 	case 16:
@@ -742,6 +757,39 @@ static void rockchip_drm_mode_fixup(struct drm_crtc_state *crtc_state,
 		crtc_funcs->mode_fixup(crtc, &crtc_state->mode, adj_mode);
 }
 
+/* A logo transaction can fail after acquiring live loader references.
+ * Stop before releasing any referenced pixels or touching panel power. A
+ * failed stop keeps its references/reservation pinned and latches the error.
+ */
+static void rockchip_logo_abort_set(struct drm_device *dev,
+                                    struct rockchip_drm_mode_set *set,int error)
+{
+ struct rockchip_drm_private *priv=dev->dev_private;
+ struct drm_encoder *encoder;
+ struct drm_bridge *bridge;
+ unsigned int pipe;
+ int blank,stop;
+ if(!set->sub_dev->guarded_panel_init || error>=0)return;
+ pipe=drm_crtc_index(set->crtc);
+ encoder=rockchip_drm_connector_get_single_encoder(set->sub_dev->connector);
+ bridge=encoder ? drm_bridge_chain_get_first_bridge(encoder):NULL;
+ rockchip_logo_reject();
+ blank=dw_mipi_dsi_blank_before_prepare(bridge);
+ stop=priv->crtc_funcs[pipe] && priv->crtc_funcs[pipe]->panel_quiesce ?
+      priv->crtc_funcs[pipe]->panel_quiesce(set->crtc):-EOPNOTSUPP;
+ if(!stop) {
+  dw_mipi_dsi_abort_before_crtc(bridge,error);
+ }else{
+  if (priv->logo)
+   priv->logo->quarantined = true;
+  if(priv->crtc_funcs[pipe] && priv->crtc_funcs[pipe]->panel_fail)
+   priv->crtc_funcs[pipe]->panel_fail(set->crtc,stop);
+  dev_err(dev->dev,"LOGO32: failed logo stop %d; keep memory/clocks pinned, no reset\n",stop);
+ }
+ if(blank)dev_err(dev->dev,"LOGO32: failed logo backlight-off %d\n",blank);
+ set->loader_proven=false;
+}
+
 static int setup_initial_state(struct drm_device *drm_dev,
 			       struct drm_atomic_state *state,
 			       struct rockchip_drm_mode_set *set)
@@ -780,7 +828,7 @@ static int setup_initial_state(struct drm_device *drm_dev,
 	else
 		conn_state->best_encoder = rockchip_drm_connector_get_single_encoder(connector);
 
-	if (set->sub_dev->loader_protect) {
+	if (!set->sub_dev->guarded_panel_init && set->sub_dev->loader_protect) {
 		ret = set->sub_dev->loader_protect(conn_state->best_encoder, true);
 		if (ret) {
 			dev_err(drm_dev->dev,
@@ -804,6 +852,71 @@ static int setup_initial_state(struct drm_device *drm_dev,
 		goto error_conn;
 	}
 
+	if (set->sub_dev->guarded_panel_init) {
+		struct drm_bridge *bridge = drm_bridge_chain_get_first_bridge(conn_state->best_encoder);
+		int blank;
+		list_for_each_entry(mode, &connector->modes, head) {
+			if (mode->status != MODE_OK)
+				continue;
+			drm_mode_copy(&adj_mode, mode);
+			rockchip_drm_mode_fixup(crtc_state, conn_state, &adj_mode);
+			if (rockchip_logo_match_mode(&adj_mode))
+				continue;
+			if (!set->fb || !priv->crtc_funcs[pipe] ||
+			    !priv->crtc_funcs[pipe]->loader_validate)
+				break;
+			ret = priv->crtc_funcs[pipe]->loader_validate(crtc);
+			if (!ret)
+				ret = dw_mipi_dsi_adopt_loader(bridge, &adj_mode);
+			if (ret)
+				break;
+			set->loader_proven = true;
+			rockchip_logo_first_frame(); /* A live VOP frame was already observed. */
+			found = match = 1;
+			is_crtc_enabled = true;
+			dev_info(drm_dev->dev, "LOGO32: checked continuous adoption selected\n");
+			goto selected_mode;
+		}
+		/* No valid proof is NOT an init failure: stop and run checked init.
+		 * Clear early backlight/PHY adoption permission before any cold reset.
+		 */
+		rockchip_logo_reject();
+
+		blank = dw_mipi_dsi_blank_before_prepare(bridge);
+
+		if (priv->crtc_funcs[pipe] && priv->crtc_funcs[pipe]->panel_quiesce)
+			ret = priv->crtc_funcs[pipe]->panel_quiesce(crtc);
+		else
+			ret = -EOPNOTSUPP;
+		if (ret)
+			return ret;
+		if (blank) {
+			dw_mipi_dsi_abort_before_crtc(bridge, blank);
+			return blank;
+		}
+		dev_info(drm_dev->dev, "PANEL-SAFE: retaining logo buffer, not adopting loader panel state\n");
+	
+	}
+	if (set->sub_dev->guarded_panel_init) {
+		list_for_each_entry(mode, &connector->modes, head) {
+			if (mode->status != MODE_OK)
+				continue;
+			if (!found || (mode->type & DRM_MODE_TYPE_PREFERRED)) {
+				set->mode = mode;
+				found = 1;
+			}
+			if (mode->type & DRM_MODE_TYPE_PREFERRED)
+				break;
+		}
+		if (!found) {
+			ret = -EINVAL;
+			goto error_conn;
+		}
+		mode = set->mode;
+		drm_mode_copy(&adj_mode, mode);
+		rockchip_drm_mode_fixup(crtc_state, conn_state, &adj_mode);
+		goto selected_mode;
+	}
 	list_for_each_entry(mode, &connector->modes, head) {
 		drm_mode_copy(&adj_mode, mode);
 		rockchip_drm_mode_fixup(crtc_state, conn_state, &adj_mode);
@@ -842,6 +955,7 @@ static int setup_initial_state(struct drm_device *drm_dev,
 		goto error_conn;
 	}
 
+selected_mode:
 	conn_state->tv.brightness = set->brightness;
 	conn_state->tv.contrast = set->contrast;
 	conn_state->tv.saturation = set->saturation;
@@ -916,10 +1030,12 @@ static int setup_initial_state(struct drm_device *drm_dev,
 	return 0;
 
 error_crtc:
-	if (priv->crtc_funcs[pipe] && priv->crtc_funcs[pipe]->loader_protect)
+	if (!set->sub_dev->guarded_panel_init && priv->crtc_funcs[pipe] &&
+	    priv->crtc_funcs[pipe]->loader_protect)
 		priv->crtc_funcs[pipe]->loader_protect(crtc, false, NULL);
 error_conn:
-	if (set->sub_dev->loader_protect)
+	rockchip_logo_abort_set(drm_dev, set, ret);
+	if (!set->sub_dev->guarded_panel_init && set->sub_dev->loader_protect)
 		set->sub_dev->loader_protect(conn_state->best_encoder, false);
 
 	return ret;
@@ -1024,7 +1140,7 @@ static void rockchip_drm_copy_mode_from_mode_set(struct drm_display_mode *mode,
 
 void rockchip_drm_show_logo(struct drm_device *drm_dev)
 {
-	struct drm_atomic_state *state, *old_state;
+	struct drm_atomic_state *state = NULL, *old_state = NULL;
 	struct device_node *np = drm_dev->dev->of_node;
 	struct drm_mode_config *mode_config = &drm_dev->mode_config;
 	struct rockchip_drm_private *private = drm_dev->dev_private;
@@ -1106,7 +1222,8 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 			 * should be converted to crtc_state->adjusted_mode, in order to check
 			 * splice_mode flag in loader_protect().
 			 */
-			if (unset->hdisplay && unset->vdisplay) {
+			if (!unset->sub_dev->guarded_panel_init &&
+			    unset->hdisplay && unset->vdisplay) {
 				crtc_state = drm_atomic_get_crtc_state(state, crtc);
 				if (crtc_state)
 					rockchip_drm_copy_mode_from_mode_set(&crtc_state->adjusted_mode,
@@ -1137,13 +1254,17 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 	 * drm devices as old state, so if new state come, can compare
 	 * with this state to judge which status need to update.
 	 */
-	WARN_ON(drm_atomic_helper_swap_state(state, false));
+	ret = drm_atomic_helper_swap_state(state, false);
+	if (ret)
+		goto err_free_state;
 	drm_atomic_state_put(state);
+	state = NULL;
 	old_state = drm_atomic_helper_duplicate_state(drm_dev,
 						      mode_config->acquire_ctx);
 	if (IS_ERR(old_state)) {
 		dev_err(drm_dev->dev, "failed to duplicate atomic state for logo display\n");
-		ret = PTR_ERR_OR_ZERO(old_state);
+		ret = PTR_ERR(old_state);
+		old_state = NULL;
 		goto err_free_state;
 	}
 
@@ -1151,16 +1272,17 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 						  mode_config->acquire_ctx);
 	if (IS_ERR(state)) {
 		dev_err(drm_dev->dev, "failed to duplicate atomic state for logo display\n");
-		ret = PTR_ERR_OR_ZERO(state);
-		goto err_free_old_state;
+		ret = PTR_ERR(state);
+		state = NULL;
+		goto err_free_state;
 	}
 	state->acquire_ctx = mode_config->acquire_ctx;
 
-	list_for_each_entry(set, &mode_set_list, head)
-		/*
-		 * We don't want to see any fail on update_state.
-		 */
-		WARN_ON(update_state(drm_dev, state, set, &plane_mask));
+	list_for_each_entry(set, &mode_set_list, head) {
+		ret = update_state(drm_dev, state, set, &plane_mask);
+		if (ret)
+			goto err_free_state;
+	}
 
 	for (i = 0; i < state->num_connector; i++) {
 		if (state->connectors[i].new_state->connector->status !=
@@ -1174,12 +1296,7 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 	 * drm_atomic_clean_old_fb(drm_dev, plane_mask, ret);
 	 */
 
-	list_for_each_entry_safe(set, tmp, &mode_set_list, head) {
-		if (set->force_output)
-			set->sub_dev->connector->force = DRM_FORCE_UNSPECIFIED;
-		list_del(&set->head);
-		kfree(set);
-	}
+
 
 	/*
 	 * Is possible get deadlock here?
@@ -1192,6 +1309,13 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 		 */
 		WARN_ON(drm_atomic_helper_swap_state(old_state, false));
 		goto err_free_state;
+	}
+
+	list_for_each_entry_safe(set, tmp, &mode_set_list, head) {
+		if (set->force_output)
+			set->sub_dev->connector->force = DRM_FORCE_UNSPECIFIED;
+		list_del(&set->head);
+		kfree(set);
 	}
 
 	rockchip_free_loader_memory(drm_dev);
@@ -1212,10 +1336,19 @@ void rockchip_drm_show_logo(struct drm_device *drm_dev)
 	}
 
 	return;
-err_free_old_state:
-	drm_atomic_state_put(old_state);
 err_free_state:
-	drm_atomic_state_put(state);
+	list_for_each_entry(set, &mode_set_list, head)
+		rockchip_logo_abort_set(drm_dev, set, ret);
+	if (old_state)
+		drm_atomic_state_put(old_state);
+	if (state)
+		drm_atomic_state_put(state);
+	list_for_each_entry_safe(set, tmp, &mode_set_list, head) {
+		if (set->force_output)
+			set->sub_dev->connector->force = DRM_FORCE_UNSPECIFIED;
+		list_del(&set->head);
+		kfree(set);
+	}
 err_unlock:
 	drm_modeset_unlock_all(drm_dev);
 	if (ret)

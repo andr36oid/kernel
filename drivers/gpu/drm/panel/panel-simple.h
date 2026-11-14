@@ -10,8 +10,13 @@
 
 #if IS_REACHABLE(CONFIG_DRM_PANEL_SIMPLE)
 int panel_simple_loader_protect(struct drm_panel *panel);
+int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *step);
 int panel_simple_loader_unprotect(struct drm_panel *panel);
 #else
+static inline int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *step)
+{
+	return error ? error : -EOPNOTSUPP;
+}
 static inline int panel_simple_loader_protect(struct drm_panel *panel)
 {
 	return 0;
@@ -22,3 +27,5 @@ static inline int panel_simple_loader_unprotect(struct drm_panel *panel)
 }
 #endif
 #endif
+
+int panel_simple_verify_loader(struct drm_panel *panel);

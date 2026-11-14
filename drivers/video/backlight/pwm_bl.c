@@ -13,6 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/fb.h>
 #include <linux/backlight.h>
+#include <linux/rockchip_logo_handoff.h>
 #include <linux/err.h>
 #include <linux/pwm.h>
 #include <linux/pwm_backlight.h>
@@ -25,6 +26,8 @@ MODULE_PARM_DESC(quiescent,
 		 "pwm bl quiescent when reboot quiescent [default=false]");
 
 struct pwm_bl_data {
+	bool proof_handoff, guard_output, preserve_first_update;
+	int boot_error;
 	struct pwm_device	*pwm;
 	struct device		*dev;
 	unsigned int		lth_brightness;
@@ -46,14 +49,75 @@ struct pwm_bl_data {
 	void			(*exit)(struct device *);
 };
 
-static void pwm_backlight_power_on(struct pwm_bl_data *pb)
+/* Safety-scoped readback: pwm_get_state() alone is the framework cache.
+ * Rockchip's provider callback acquires pclk and reads actual enable registers.
+ * A callback which cannot read leaves the deliberately opposite sentinel.
+ */
+static int pwm_backlight_verify(struct pwm_bl_data *pb, bool enabled)
+{
+ struct pwm_state observed = { .enabled = !enabled };
+ if (!pb->pwm->chip->ops->get_state)
+  return -EOPNOTSUPP;
+ pb->pwm->chip->ops->get_state(pb->pwm->chip, pb->pwm, &observed);
+ if (observed.enabled != enabled || (enabled && !observed.period))
+  return -EIO;
+ return 0;
+}
+static int pwm_backlight_checked_off(struct pwm_bl_data *pb)
+{
+ struct pwm_state state;
+ int error=0, ret;
+ pwm_get_state(pb->pwm,&state);
+ if(pb->enable_gpio) {
+  ret=gpiod_direction_output(pb->enable_gpio,0);
+  if(ret)error=ret;
+  else if(gpiod_get_value_cansleep(pb->enable_gpio)!=0)error=-EIO;
+ }
+ if(pb->pwm_off_delay)msleep(pb->pwm_off_delay);
+ state.enabled=false;state.duty_cycle=0;
+ ret=pwm_apply_state(pb->pwm,&state);if(ret&&!error)error=ret;
+ ret=pwm_backlight_verify(pb,false);if(ret&&!error)error=ret;
+ if(pb->enabled) {
+  ret=regulator_disable(pb->power_supply);
+  if(ret&&!error)error=ret;
+  if(!ret)pb->enabled=false;
+ }
+ return error;
+}
+static int pwm_backlight_checked_on(struct pwm_bl_data *pb)
+{
+ struct pwm_state state;int ret;
+ if(pb->enabled)return pwm_backlight_verify(pb,true);
+ ret=regulator_enable(pb->power_supply);if(ret)return ret;
+ pb->enabled=true; /* Own exactly one regulator reference, even on unwind. */
+ pwm_get_state(pb->pwm,&state);state.enabled=true;
+ ret=pwm_apply_state(pb->pwm,&state);if(ret)goto fail;
+ ret=pwm_backlight_verify(pb,true);if(ret)goto fail;
+ if(pb->post_pwm_on_delay)msleep(pb->post_pwm_on_delay);
+ if(pb->enable_gpio) {
+  ret=gpiod_direction_output(pb->enable_gpio,1);if(ret)goto fail;
+  if(gpiod_get_value_cansleep(pb->enable_gpio)!=1){ret=-EIO;goto fail;}
+ }
+ return 0;
+fail:
+ (void)pwm_backlight_checked_off(pb);
+ return ret;
+}
+
+static int pwm_backlight_power_on(struct pwm_bl_data *pb)
 {
 	struct pwm_state state;
 	int err;
+	if (pb->guard_output) {
+		err = pwm_backlight_checked_on(pb);
+		if (err && !pb->boot_error)
+			pb->boot_error = err;
+		return err;
+	}
 
 	pwm_get_state(pb->pwm, &state);
 	if (pb->enabled)
-		return;
+		return 0;
 
 	err = regulator_enable(pb->power_supply);
 	if (err < 0)
@@ -69,15 +133,23 @@ static void pwm_backlight_power_on(struct pwm_bl_data *pb)
 		gpiod_set_value_cansleep(pb->enable_gpio, 1);
 
 	pb->enabled = true;
+	return 0;
 }
 
-static void pwm_backlight_power_off(struct pwm_bl_data *pb)
+static int pwm_backlight_power_off(struct pwm_bl_data *pb)
 {
 	struct pwm_state state;
+	int ret;
+	if (pb->guard_output) {
+		ret = pwm_backlight_checked_off(pb);
+		if (ret && !pb->boot_error)
+			pb->boot_error = ret;
+		return ret;
+	}
 
 	pwm_get_state(pb->pwm, &state);
 	if (!pb->enabled && !state.enabled)
-		return;
+		return 0;
 
 	if (pb->enable_gpio)
 		gpiod_set_value_cansleep(pb->enable_gpio, 0);
@@ -93,6 +165,7 @@ static void pwm_backlight_power_off(struct pwm_bl_data *pb)
 	if (pb->enabled)
 		regulator_disable(pb->power_supply);
 	pb->enabled = false;
+	return 0;
 }
 
 static int compute_duty_cycle(struct pwm_bl_data *pb, int brightness)
@@ -119,9 +192,28 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 	struct pwm_bl_data *pb = bl_get_data(bl);
 	int brightness = backlight_get_brightness(bl);
 	struct pwm_state state;
+	int ret;
+
+	if (pb->guard_output && pb->boot_error)
+		return pb->boot_error;
 
 	if (pb->notify)
 		brightness = pb->notify(pb->dev, brightness);
+	/* No app/property/fbcon update can expose a cold, unprepared DSI panel.
+	 * A pending producer proof only preserves the already-initialized loader
+	 * picture; the late live verifier must still accept it before adoption.
+	 */
+	if (pb->guard_output && !rockchip_logo_output_ready() && !pb->proof_handoff)
+		brightness = 0;
+	if (pb->preserve_first_update && brightness > 0) {
+		pb->preserve_first_update = false;
+		return 0;
+	}
+	if (brightness == 0) {
+		pb->proof_handoff = false;
+		pb->preserve_first_update = false;
+	}
+
 
 	if (brightness > 0) {
 		u64 duty_cycle = compute_duty_cycle(pb, brightness);
@@ -130,17 +222,31 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 
 		if (!pb->enabled && pb->kick_ms && duty_cycle < pb->kick_duty) {
 			state.duty_cycle = pb->kick_duty;
-			pwm_apply_state(pb->pwm, &state);
-			pwm_backlight_power_on(pb);
+			ret = pwm_apply_state(pb->pwm, &state);
+			if (ret && pb->guard_output) {
+				pb->boot_error = ret;
+				return ret;
+			}
+			ret = pwm_backlight_power_on(pb);
+			if (ret)
+				return ret;
 			msleep(pb->kick_ms);
 			/* Preserve enabled=true after the pulse, restoring only duty. */
 			pwm_get_state(pb->pwm, &state);
 		}
 		state.duty_cycle = duty_cycle;
-		pwm_apply_state(pb->pwm, &state);
-		pwm_backlight_power_on(pb);
+		ret = pwm_apply_state(pb->pwm, &state);
+			if (ret && pb->guard_output) {
+				pb->boot_error = ret;
+				return ret;
+			}
+		ret = pwm_backlight_power_on(pb);
+			if (ret)
+				return ret;
 	} else {
-		pwm_backlight_power_off(pb);
+		ret = pwm_backlight_power_off(pb);
+		if (ret)
+			return ret;
 	}
 
 	if (pb->notify_after)
@@ -443,7 +549,9 @@ static int pwm_backlight_initial_power_state(const struct pwm_bl_data *pb)
 	 * In particular, do not light a bootloader-initialized but unscanned
 	 * panel while the kernel is rebuilding its display pipeline.
 	 */
-	if (node && of_property_read_bool(node, "andr36oid,wait-for-panel")) {
+	if ((pb->guard_output && !pb->proof_handoff) ||
+	    (node && of_property_read_bool(node, "andr36oid,wait-for-panel") &&
+	     !pb->proof_handoff)) {
 		dev_info(pb->dev, "andr36oid: backlight held off until panel enable\n");
 		return FB_BLANK_POWERDOWN;
 	}
@@ -559,8 +667,45 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "got pwm for backlight\n");
 
-	/* Sync up PWM state. */
-	pwm_init_state(pb->pwm, &state);
+	pb->guard_output = rockchip_logo_backlight_guarded(node);
+	pb->proof_handoff = !bl_quiescent &&
+		rockchip_logo_backlight_handoff(node);
+	pwm_get_state(pb->pwm, &state);
+	if (pb->proof_handoff) {
+		struct pwm_state observed = { 0 };
+		if (pb->pwm->chip->ops->get_state)
+			pb->pwm->chip->ops->get_state(pb->pwm->chip, pb->pwm, &observed);
+		state = observed;
+	}
+	if (pb->proof_handoff && (!state.enabled || !state.period ||
+	    state.period != pb->pwm->args.period ||
+	    state.polarity != pb->pwm->args.polarity ||
+	    !state.duty_cycle || state.duty_cycle > state.period)) {
+		rockchip_logo_reject();
+		pb->proof_handoff = false;
+	}
+	if (pb->proof_handoff) {
+		ret = regulator_is_enabled(pb->power_supply);
+		if (ret <= 0 || (pb->enable_gpio &&
+		    gpiod_get_value_cansleep(pb->enable_gpio) != 1)) {
+			rockchip_logo_reject();
+			pb->proof_handoff = false;
+		}
+	}
+	if (pb->proof_handoff) {
+		ret = regulator_enable(pb->power_supply);
+		if (ret) {
+			rockchip_logo_reject();
+			pb->proof_handoff = false;
+		} else {
+			pb->enabled = true; /* One balanced regulator reference. */
+			pb->preserve_first_update = true;
+			dev_info(pb->dev, "LOGO32: preserving proven loader PWM duty\n");
+		}
+	}
+	/* Sync up PWM state only when not preserving a proven live signal. */
+	if (!pb->proof_handoff)
+		pwm_init_state(pb->pwm, &state);
 
 	/*
 	 * The DT case will set the pwm_period_ns field to 0 and store the
@@ -571,7 +716,7 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	if (!state.period && (data->pwm_period_ns > 0))
 		state.period = data->pwm_period_ns;
 
-	ret = pwm_apply_state(pb->pwm, &state);
+	ret = pb->proof_handoff ? 0 : pwm_apply_state(pb->pwm, &state);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to apply initial PWM state: %d\n",
 			ret);
@@ -632,7 +777,8 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 		pb->scale = data->max_brightness;
 	}
 
-	pwm_adjust_config(pb->pwm);
+	if (!pb->proof_handoff)
+		pwm_adjust_config(pb->pwm);
 
 	pb->lth_brightness = data->lth_brightness * (div_u64(state.period,
 				pb->scale));
@@ -673,12 +819,26 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 		bl->props.brightness = data->dft_brightness;
 
 	bl->props.power = pwm_backlight_initial_power_state(pb);
-	backlight_update_status(bl);
+	ret = backlight_update_status(bl);
+	if (ret && pb->guard_output) {
+		/* Keep the provider registered: DRM must bind and ACK-stop VOP
+		 * even if blanking failed. A failed provider probe would defer
+		 * the entire display before that safety gate can execute.
+		 */
+		if (!pb->boot_error)
+			pb->boot_error = ret;
+		dev_err(pb->dev, "LOGO32: backlight error %d latched; display must stay stopped\n", ret);
+	}
 
 	platform_set_drvdata(pdev, bl);
 	return 0;
 
 err_alloc:
+	if (pb->proof_handoff && pb->enabled) {
+		regulator_disable(pb->power_supply);
+		pb->enabled = false;
+		rockchip_logo_reject();
+	}
 	if (data->exit)
 		data->exit(&pdev->dev);
 	return ret;

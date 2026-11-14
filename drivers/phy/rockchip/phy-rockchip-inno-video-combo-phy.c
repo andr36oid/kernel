@@ -18,6 +18,8 @@
 #include <linux/phy/phy.h>
 #include <linux/pm_runtime.h>
 #include <linux/mfd/syscon.h>
+#include <linux/rockchip_logo_handoff.h>
+#include <linux/phy/phy-rockchip-logo.h>
 
 #define PSEC_PER_SEC	1000000000000LL
 
@@ -529,11 +531,28 @@ static int inno_video_phy_power_on(struct phy *phy)
 {
 	struct inno_video_phy *inno = phy_get_drvdata(phy);
 	enum phy_mode mode = phy_get_mode(phy);
+	int ret;
 
-	clk_prepare_enable(inno->ref_clk);
-	clk_prepare_enable(inno->pclk_host);
-	clk_prepare_enable(inno->pclk_phy);
-	pm_runtime_get_sync(inno->dev);
+	ret = clk_prepare_enable(inno->ref_clk);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(inno->pclk_host);
+	if (ret)
+		goto disable_ref;
+	ret = clk_prepare_enable(inno->pclk_phy);
+	if (ret)
+		goto disable_host;
+	ret = pm_runtime_get_sync(inno->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(inno->dev);
+		goto disable_phy;
+	}
+
+	/* Balanced normal clock/PM references above; no PLL/reset/GRF writes.
+	 * Only the late DSI live verifier can arm this short-lived gate.
+	 */
+	if (mode == PHY_MODE_MIPI_DPHY && rockchip_logo_phy_adopting())
+		return 0;
 
 	/* Bandgap power on */
 	phy_update_bits(inno, REGISTER_PART_ANALOG, 0x00,
@@ -555,6 +574,13 @@ static int inno_video_phy_power_on(struct phy *phy)
 	}
 
 	return 0;
+ disable_phy:
+	clk_disable_unprepare(inno->pclk_phy);
+ disable_host:
+	clk_disable_unprepare(inno->pclk_host);
+ disable_ref:
+	clk_disable_unprepare(inno->ref_clk);
+	return ret;
 }
 
 static int inno_video_phy_power_off(struct phy *phy)
@@ -602,6 +628,31 @@ static const struct phy_ops inno_video_phy_ops = {
 	.power_off = inno_video_phy_power_off,
 	.owner = THIS_MODULE,
 };
+
+/* Provisional access references, no PLL/reset/analog writes. A rejected
+ * proof drops them only after the display caller acknowledges VOP standby.
+ */
+int inno_video_phy_hold_loader(struct phy *phy,bool on)
+{
+ struct inno_video_phy *inno;int ret;
+ if(!phy || phy->ops!=&inno_video_phy_ops)return -EOPNOTSUPP;
+ inno=phy_get_drvdata(phy);
+ if(!on){
+  pm_runtime_put(inno->dev);clk_disable_unprepare(inno->pclk_phy);
+  clk_disable_unprepare(inno->pclk_host);clk_disable_unprepare(inno->ref_clk);
+  return 0;
+ }
+ ret=clk_prepare_enable(inno->ref_clk);if(ret)return ret;
+ ret=clk_prepare_enable(inno->pclk_host);if(ret)goto ref;
+ ret=clk_prepare_enable(inno->pclk_phy);if(ret)goto host;
+ ret=pm_runtime_get_sync(inno->dev);
+ if(ret<0){pm_runtime_put_noidle(inno->dev);goto pclk;}
+ return 0;
+pclk:clk_disable_unprepare(inno->pclk_phy);
+host:clk_disable_unprepare(inno->pclk_host);
+ref:clk_disable_unprepare(inno->ref_clk);return ret;
+}
+EXPORT_SYMBOL_GPL(inno_video_phy_hold_loader);
 
 static unsigned long inno_video_phy_pll_round_rate(struct inno_video_phy *inno,
 						   unsigned long prate,

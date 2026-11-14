@@ -16,6 +16,8 @@
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/phy/phy.h>
+#include <linux/phy/phy-rockchip-logo.h>
+#include <linux/rockchip_logo_handoff.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
@@ -296,6 +298,7 @@ struct dw_mipi_dsi_rockchip {
 
 	/* optional external dphy */
 	bool phy_enabled;
+	bool loader_phy_init;
 	struct phy *phy;
 	union phy_configure_opts phy_opts;
 
@@ -447,27 +450,39 @@ static inline unsigned int ns2ui(struct dw_mipi_dsi_rockchip *dsi, int ns)
 	return DIV_ROUND_UP(ns * dsi->lane_mbps, 1000);
 }
 
-static void dw_mipi_dsi_phy_tx_config(struct dw_mipi_dsi_rockchip *dsi)
+static int dw_mipi_dsi_phy_tx_config(struct dw_mipi_dsi_rockchip *dsi)
 {
-	if (dsi->cdata->lanecfg1_grf_reg)
-		regmap_write(dsi->grf_regmap, dsi->cdata->lanecfg1_grf_reg,
-					      dsi->cdata->lanecfg1);
+	int ret;
 
-	if (dsi->cdata->lanecfg2_grf_reg)
-		regmap_write(dsi->grf_regmap, dsi->cdata->lanecfg2_grf_reg,
-					      dsi->cdata->lanecfg2);
-
-	if (dsi->cdata->enable_grf_reg)
-		regmap_write(dsi->grf_regmap, dsi->cdata->enable_grf_reg,
-					      dsi->cdata->enable);
+	if (dsi->cdata->lanecfg1_grf_reg) {
+		ret = regmap_write(dsi->grf_regmap, dsi->cdata->lanecfg1_grf_reg,
+				   dsi->cdata->lanecfg1);
+		if (ret)
+			return ret;
+	}
+	if (dsi->cdata->lanecfg2_grf_reg) {
+		ret = regmap_write(dsi->grf_regmap, dsi->cdata->lanecfg2_grf_reg,
+				   dsi->cdata->lanecfg2);
+		if (ret)
+			return ret;
+	}
+	if (dsi->cdata->enable_grf_reg) {
+		ret = regmap_write(dsi->grf_regmap, dsi->cdata->enable_grf_reg,
+				   dsi->cdata->enable);
+		if (ret)
+			return ret;
+	}
+	return 0;
 }
 
 static int dw_mipi_dsi_phy_init(void *priv_data)
 {
 	struct dw_mipi_dsi_rockchip *dsi = priv_data;
-	int i, vco;
+	int i, vco, ret;
 
-	dw_mipi_dsi_phy_tx_config(dsi);
+	ret = dw_mipi_dsi_phy_tx_config(dsi);
+	if (ret)
+		return ret;
 
 	if (dsi->phy)
 		return 0;
@@ -572,6 +587,38 @@ static int dw_mipi_dsi_phy_init(void *priv_data)
 	return 0;
 }
 
+static int dw_mipi_dsi_phy_hold_loader(void *priv_data,bool on)
+{
+ struct dw_mipi_dsi_rockchip *dsi=priv_data;
+ return inno_video_phy_hold_loader(dsi->phy,on);
+}
+
+static int dw_mipi_dsi_phy_adopt_loader(void *priv_data)
+{
+ struct dw_mipi_dsi_rockchip *dsi=priv_data;int ret;
+ if(!dsi->phy || dsi->phy_enabled || dsi->slave)return -EOPNOTSUPP;
+ ret=phy_set_mode(dsi->phy,PHY_MODE_MIPI_DPHY);if(ret)return ret;
+ ret=phy_init(dsi->phy);if(ret)return ret;
+ rockchip_logo_adopting_phy(true);
+ ret=phy_power_on(dsi->phy);
+ rockchip_logo_adopting_phy(false);
+ if(ret){phy_exit(dsi->phy);return ret;}
+ dsi->phy_enabled=true;dsi->loader_phy_init=true;return 0;
+}
+
+static int dw_mipi_dsi_phy_power_on_checked(void *priv_data)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	int ret;
+
+	if (dsi->phy_enabled)
+		return 0;
+	ret = phy_power_on(dsi->phy);
+	if (!ret)
+		dsi->phy_enabled = true;
+	return ret;
+}
+
 static void dw_mipi_dsi_phy_power_on(void *priv_data)
 {
 	struct dw_mipi_dsi_rockchip *dsi = priv_data;
@@ -581,6 +628,25 @@ static void dw_mipi_dsi_phy_power_on(void *priv_data)
 
 	phy_power_on(dsi->phy);
 	dsi->phy_enabled = true;
+}
+
+static int dw_mipi_dsi_phy_power_off_checked(void *priv_data)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	int ret;
+
+	if (!dsi->phy_enabled)
+		return 0;
+	ret = phy_power_off(dsi->phy);
+	if (!ret) {
+		dsi->phy_enabled = false;
+		if (dsi->loader_phy_init) {
+			ret = phy_exit(dsi->phy);
+			if (!ret)
+				dsi->loader_phy_init = false;
+		}
+	}
+	return ret;
 }
 
 static void dw_mipi_dsi_phy_power_off(void *priv_data)
@@ -719,7 +785,9 @@ dw_mipi_dsi_get_lane_mbps(void *priv_data, const struct drm_display_mode *mode,
 			return ret;
 		}
 
-		phy_configure(dsi->phy, &dsi->phy_opts);
+		ret = phy_configure(dsi->phy, &dsi->phy_opts);
+		if (ret)
+			return ret;
 		hs_clk_rate = dsi->phy_opts.mipi_dphy.hs_clk_rate;
 		dsi->lane_mbps = DIV_ROUND_UP(hs_clk_rate, USEC_PER_SEC);
 		*lane_mbps = dsi->lane_mbps;
@@ -806,6 +874,10 @@ dw_mipi_dsi_phy_get_timing(void *priv_data, unsigned int lane_mbps,
 static const struct dw_mipi_dsi_phy_ops dw_mipi_dsi_rockchip_phy_ops = {
 	.init = dw_mipi_dsi_phy_init,
 	.power_on = dw_mipi_dsi_phy_power_on,
+	.power_on_checked = dw_mipi_dsi_phy_power_on_checked,
+	.adopt_loader = dw_mipi_dsi_phy_adopt_loader,
+	.hold_loader = dw_mipi_dsi_phy_hold_loader,
+	.power_off_checked = dw_mipi_dsi_phy_power_off_checked,
 	.power_off = dw_mipi_dsi_phy_power_off,
 	.get_lane_mbps = dw_mipi_dsi_get_lane_mbps,
 	.get_timing = dw_mipi_dsi_phy_get_timing,
@@ -936,13 +1008,61 @@ static void dw_mipi_dsi_rockchip_loader_protect(struct dw_mipi_dsi_rockchip *dsi
 		dw_mipi_dsi_rockchip_loader_protect(dsi->slave, on);
 }
 
+static int dw_mipi_dsi_rockchip_quiesce_panel(void *priv_data)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	struct drm_encoder *encoder = &dsi->encoder;
+	struct rockchip_drm_private *private = encoder->dev->dev_private;
+	struct drm_crtc *crtc = encoder->crtc;
+	int pipe;
+
+	if (!crtc)
+		return -ENODEV;
+	pipe = drm_crtc_index(crtc);
+	if (!private->crtc_funcs[pipe] ||
+	    !private->crtc_funcs[pipe]->panel_quiesce)
+		return -EOPNOTSUPP;
+	return private->crtc_funcs[pipe]->panel_quiesce(crtc);
+}
+
+static void dw_mipi_dsi_rockchip_panel_fail(void *priv_data, int error)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	struct drm_encoder *encoder = &dsi->encoder;
+	struct rockchip_drm_private *private = encoder->dev->dev_private;
+	struct drm_crtc *crtc = encoder->crtc;
+	int pipe;
+
+	if (!crtc)
+		return;
+	pipe = drm_crtc_index(crtc);
+	if (private->crtc_funcs[pipe] && private->crtc_funcs[pipe]->panel_fail)
+		private->crtc_funcs[pipe]->panel_fail(crtc, error);
+}
+
+static int dw_mipi_dsi_rockchip_frame_ready(void *priv_data)
+{
+ struct dw_mipi_dsi_rockchip *dsi=priv_data;
+ struct drm_crtc *crtc=dsi->encoder.crtc;struct rockchip_drm_private *priv;
+ unsigned int pipe;
+ if(!crtc)return -ENODEV;
+ priv=crtc->dev->dev_private;pipe=drm_crtc_index(crtc);
+ if(!priv->crtc_funcs[pipe] || !priv->crtc_funcs[pipe]->panel_frame_ready)
+  return -EOPNOTSUPP;
+ return priv->crtc_funcs[pipe]->panel_frame_ready(crtc);
+}
+
 static int dw_mipi_dsi_rockchip_encoder_loader_protect(struct drm_encoder *encoder,
 					      bool on)
 {
 	struct dw_mipi_dsi_rockchip *dsi = to_dsi(encoder);
 	int ret = 0;
 
-	dev_dbg(dsi->dev, "loader protect on=%u\n", on);
+	dev_info(dsi->dev, "DISPLAY-HANDOFF: loader protect on=%u\n", on);
+	/* Guarded direct DSI panels must never acquire a fictitious init state. */
+	if (dsi->pdata.prepare_before_crtc)
+		return on ? -EPERM : 0;
+
 	if (dsi->panel) {
 		if (on)
 			ret = panel_simple_loader_protect(dsi->panel);
@@ -1437,6 +1557,7 @@ static int dw_mipi_dsi_rockchip_bind(struct device *dev,
 	if (dsi->sub_dev.connector) {
 		dsi->sub_dev.of_node = dev->of_node;
 		dsi->sub_dev.loader_protect = dw_mipi_dsi_rockchip_encoder_loader_protect;
+		dsi->sub_dev.guarded_panel_init = dsi->cdata->soc_type == PX30;
 		rockchip_drm_register_sub_dev(&dsi->sub_dev);
 		if (device_create_file(dev, &dev_attr_preview_rate))
 			DRM_DEV_ERROR(dev, "Failed to add preview_rate\n");
@@ -1636,6 +1757,12 @@ static int dw_mipi_dsi_rockchip_probe(struct platform_device *pdev)
 	dsi->pdata.host_ops = &dw_mipi_dsi_rockchip_host_ops;
 	dsi->pdata.mode_valid = dw_mipi_dsi_rockchip_mode_valid;
 	dsi->pdata.priv_data = dsi;
+	dsi->pdata.prepare_before_crtc = dsi->cdata->soc_type == PX30;
+	dsi->pdata.frame_ready = dw_mipi_dsi_rockchip_frame_ready;
+	if (dsi->pdata.prepare_before_crtc) {
+		dsi->pdata.quiesce_before_panel_off = dw_mipi_dsi_rockchip_quiesce_panel;
+		dsi->pdata.panel_fail = dw_mipi_dsi_rockchip_panel_fail;
+	}
 
 	if (dsi->cdata->soc_type == RK3568 || dsi->cdata->soc_type == RK3562)
 		dsi->pdata.stream_standby = dw_mipi_dsi_rockchip_stream_standby;
@@ -1690,13 +1817,26 @@ static __maybe_unused int dw_mipi_dsi_runtime_suspend(struct device *dev)
 static __maybe_unused int dw_mipi_dsi_runtime_resume(struct device *dev)
 {
 	struct dw_mipi_dsi_rockchip *dsi = dev_get_drvdata(dev);
+	int ret;
 
-	clk_prepare_enable(dsi->phy_cfg_clk);
-	clk_prepare_enable(dsi->hclk);
-	clk_prepare_enable(dsi->pclk);
-	clk_prepare_enable(dsi->grf_clk);
-
-	return 0;
+	ret = clk_prepare_enable(dsi->phy_cfg_clk);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(dsi->hclk);
+	if (ret)
+		goto disable_phy_cfg;
+	ret = clk_prepare_enable(dsi->pclk);
+	if (ret)
+		goto disable_hclk;
+	ret = clk_prepare_enable(dsi->grf_clk);
+	if (!ret)
+		return 0;
+	clk_disable_unprepare(dsi->pclk);
+disable_hclk:
+	clk_disable_unprepare(dsi->hclk);
+disable_phy_cfg:
+	clk_disable_unprepare(dsi->phy_cfg_clk);
+	return ret;
 }
 
 /*

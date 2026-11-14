@@ -9,12 +9,16 @@
  */
 
 #include <linux/clk.h>
+#include <linux/backlight.h>
 #include <linux/component.h>
 #include <linux/debugfs.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/rockchip_logo_handoff.h>
+#include <drm/a36-logo-proof.h>
+#include <drm/a36-logo-hardware.h>
 #include <linux/reset.h>
 
 #include <video/mipi_display.h>
@@ -29,6 +33,7 @@
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
+#include "../../panel/panel-simple.h"
 
 #define HWVER_131			0x31333100	/* IP version 1.31 */
 
@@ -277,6 +282,11 @@ struct dw_mipi_dsi {
 
 	const struct dw_mipi_dsi_plat_data *plat_data;
 	bool support_psr;
+	bool core_active, checked_attempted, adopted_loader, loader_access_held;
+	int checked_error;
+	int checked_latched_error;
+	bool fault_cleaned;
+	const char *failed_step;
 };
 
 /*
@@ -550,7 +560,7 @@ static ssize_t dw_mipi_dsi_host_transfer(struct mipi_dsi_host *host,
 			return ret;
 		nb_bytes = msg->rx_len;
 	} else {
-		nb_bytes = packet.size;
+		nb_bytes = msg->tx_len;
 	}
 
 	return nb_bytes;
@@ -627,7 +637,7 @@ psr_out:
 		dw_mipi_dsi_disable(dsi->slave, new_crtc_state);
 }
 
-static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
+static int dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
 {
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
 	unsigned int esc_rate; /* in MHz */
@@ -642,7 +652,7 @@ static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
 		ret = phy_ops->get_esc_clk_rate(dsi->plat_data->priv_data,
 						&esc_rate);
 		if (ret)
-			DRM_DEBUG_DRIVER("Phy get_esc_clk_rate() failed\n");
+			return ret;
 	} else
 		esc_rate = 20; /* Default to 20MHz */
 
@@ -652,6 +662,8 @@ static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
 	 * which is:
 	 *     (lane_mbps >> 3) / X > esc_clk_division
 	 */
+	if (!esc_rate)
+		return -EINVAL;
 	esc_clk_division = (dsi->lane_mbps >> 3) / esc_rate + 1;
 
 	dsi_write(dsi, DSI_PWR_UP, RESET);
@@ -663,6 +675,7 @@ static void dw_mipi_dsi_init(struct dw_mipi_dsi *dsi)
 	 */
 	dsi_write(dsi, DSI_CLKMGR_CFG, TO_CLK_DIVISION(10) |
 		  TX_ESC_CLK_DIVISION(esc_clk_division));
+	return 0;
 }
 
 static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
@@ -790,7 +803,7 @@ static void dw_mipi_dsi_vertical_timing_config(struct dw_mipi_dsi *dsi,
 	dsi_write(dsi, DSI_VID_VBP_LINES, vbp);
 }
 
-static void dw_mipi_dsi_dphy_timing_config(struct dw_mipi_dsi *dsi)
+static int dw_mipi_dsi_dphy_timing_config(struct dw_mipi_dsi *dsi)
 {
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
 	struct dw_mipi_dsi_dphy_timing timing;
@@ -800,7 +813,7 @@ static void dw_mipi_dsi_dphy_timing_config(struct dw_mipi_dsi *dsi)
 	ret = phy_ops->get_timing(dsi->plat_data->priv_data,
 				  dsi->lane_mbps, &timing);
 	if (ret)
-		DRM_DEV_ERROR(dsi->dev, "Retrieving phy timings failed\n");
+		return ret;
 
 	/*
 	 * TODO dw drv improvements
@@ -827,6 +840,7 @@ static void dw_mipi_dsi_dphy_timing_config(struct dw_mipi_dsi *dsi)
 	dsi_write(dsi, DSI_PHY_TMR_LPCLK_CFG,
 		  PHY_CLKHS2LP_TIME(timing.clk_hs2lp) |
 		  PHY_CLKLP2HS_TIME(timing.clk_lp2hs));
+	return 0;
 }
 
 static void dw_mipi_dsi_dphy_interface_config(struct dw_mipi_dsi *dsi)
@@ -850,7 +864,7 @@ static void dw_mipi_dsi_dphy_init(struct dw_mipi_dsi *dsi)
 	dsi_write(dsi, DSI_PHY_TST_CTRL0, PHY_UNTESTCLR);
 }
 
-static void dw_mipi_dsi_dphy_enable(struct dw_mipi_dsi *dsi)
+static int dw_mipi_dsi_dphy_enable(struct dw_mipi_dsi *dsi)
 {
 	u32 val;
 	int ret;
@@ -860,14 +874,18 @@ static void dw_mipi_dsi_dphy_enable(struct dw_mipi_dsi *dsi)
 
 	ret = readl_poll_timeout(dsi->base + DSI_PHY_STATUS, val,
 				 val & PHY_LOCK, 1000, PHY_STATUS_TIMEOUT_US);
-	if (ret)
+	if (ret) {
 		DRM_ERROR("failed to wait phy lock state\n");
+		return ret;
+	}
 
 	ret = readl_poll_timeout(dsi->base + DSI_PHY_STATUS,
 				 val, val & PHY_STOP_STATE_CLK_LANE, 1000,
 				 PHY_STATUS_TIMEOUT_US);
 	if (ret)
 		DRM_ERROR("failed to wait phy clk lane stop state\n");
+
+	return ret;
 }
 
 static void dw_mipi_dsi_clear_err(struct dw_mipi_dsi *dsi)
@@ -878,23 +896,65 @@ static void dw_mipi_dsi_clear_err(struct dw_mipi_dsi *dsi)
 	dsi_write(dsi, DSI_INT_MSK1, 0);
 }
 
-static void dw_mipi_dsi_post_disable(struct dw_mipi_dsi *dsi, struct drm_crtc_state *new_crtc_state)
+static void dw_mipi_dsi_latch_failure(struct dw_mipi_dsi *dsi,
+				      int error, const char *step)
+{
+	if (!error)
+		return;
+	if (!dsi->checked_latched_error) {
+		dsi->checked_latched_error = error;
+		dsi->failed_step = step;
+		DRM_DEV_ERROR(dsi->dev, "PANEL-SAFE: step=%s errno=%d latched; no automatic retry\n",
+			      step, error);
+	}
+	dsi->checked_attempted = true;
+	dsi->checked_error = dsi->checked_latched_error;
+	if (dsi->plat_data->panel_fail)
+		dsi->plat_data->panel_fail(dsi->plat_data->priv_data,
+					 dsi->checked_latched_error);
+}
+
+static int dw_mipi_dsi_stop_before_off(struct dw_mipi_dsi *dsi)
+{
+	if (!dsi->plat_data->quiesce_before_panel_off)
+		return -EOPNOTSUPP;
+	return dsi->plat_data->quiesce_before_panel_off(dsi->plat_data->priv_data);
+}
+
+static int dw_mipi_dsi_post_disable(struct dw_mipi_dsi *dsi, struct drm_crtc_state *new_crtc_state)
 {
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
+	int ret;
 
-	if (phy_ops->power_off)
+	if (dsi->plat_data->prepare_before_crtc && !dsi->core_active) {
+		if (!dsi->checked_latched_error)
+			dsi->checked_attempted = false;
+		return 0;
+	}
+	if (dsi->plat_data->prepare_before_crtc && phy_ops->power_off_checked) {
+		ret = phy_ops->power_off_checked(dsi->plat_data->priv_data);
+		if (ret)
+			return ret;
+	} else if (phy_ops->power_off) {
 		phy_ops->power_off(dsi->plat_data->priv_data);
-
+	}
 	if (new_crtc_state && new_crtc_state->self_refresh_active)
 		goto psr_out;
-
 	dsi_write(dsi, DSI_PWR_UP, RESET);
 	dsi_write(dsi, DSI_PHY_RSTZ, PHY_RSTZ);
 	pm_runtime_put(dsi->dev);
-
+	if (dsi->loader_access_held && phy_ops->hold_loader) {
+		phy_ops->hold_loader(dsi->plat_data->priv_data, false);
+		dsi->loader_access_held = false;
+	}
+	dsi->core_active = false;
+	dsi->adopted_loader = false;
+	if (!dsi->checked_latched_error)
+		dsi->checked_attempted = false;
 psr_out:
 	if (dsi->slave)
-		dw_mipi_dsi_post_disable(dsi->slave, new_crtc_state);
+		return dw_mipi_dsi_post_disable(dsi->slave, new_crtc_state);
+	return 0;
 }
 
 static struct drm_crtc *dw_mipi_dsi_get_new_crtc(struct dw_mipi_dsi *dsi,
@@ -923,6 +983,18 @@ static void dw_mipi_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
 	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
 	struct drm_crtc *new_crtc;
 	struct drm_crtc_state *new_crtc_state = NULL;
+	int ret;
+
+	if (pdata->prepare_before_crtc) {
+		if (dsi->checked_latched_error)
+			return;
+		ret = dw_mipi_dsi_stop_before_off(dsi);
+		if (ret) {
+			dw_mipi_dsi_latch_failure(dsi, ret, "post-disable-vop-hold-ack");
+			return;
+		}
+	}
+
 
 	new_crtc = dw_mipi_dsi_get_new_crtc(dsi, old_state);
 	if (new_crtc)
@@ -932,11 +1004,22 @@ static void dw_mipi_dsi_bridge_atomic_post_disable(struct drm_bridge *bridge,
 		dev_info(dsi->dev, "%s:%d:psr entry\n", __func__, __LINE__);
 
 	if (!new_crtc_state || !new_crtc_state->self_refresh_active) {
-		if (dsi->panel)
-			drm_panel_unprepare(dsi->panel);
+		if (dsi->panel) {
+			ret = drm_panel_unprepare(dsi->panel);
+			if (ret && pdata->prepare_before_crtc) {
+				dw_mipi_dsi_abort_before_crtc(bridge, ret);
+				return;
+			}
+		}
 	}
 
-	dw_mipi_dsi_post_disable(dsi, new_crtc_state);
+	ret = dw_mipi_dsi_post_disable(dsi, new_crtc_state);
+	if (ret && pdata->prepare_before_crtc) {
+		/* The off request already failed once: do not loop/retry it. */
+		dsi->fault_cleaned = true;
+		dw_mipi_dsi_latch_failure(dsi, ret, "phy-power-off");
+		return;
+	}
 
 	if (pdata->stream_standby)
 		pdata->stream_standby(pdata->priv_data, 0);
@@ -950,15 +1033,43 @@ static void dw_mipi_dsi_bridge_atomic_disable(struct drm_bridge *bridge,
 	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
 	struct drm_crtc *new_crtc;
 	struct drm_crtc_state *new_crtc_state = NULL;
+	int ret, blank;
+
+	if (pdata->prepare_before_crtc) {
+		if (dsi->checked_latched_error)
+			return;
+		blank = dsi->panel ? backlight_disable(dsi->panel->backlight) : -EOPNOTSUPP;
+		ret = dw_mipi_dsi_stop_before_off(dsi);
+		if (ret) {
+			dw_mipi_dsi_latch_failure(dsi, ret, "disable-vop-hold-ack");
+			return;
+		}
+		if (blank) {
+			dw_mipi_dsi_abort_before_crtc(bridge, blank);
+			return;
+		}
+		if (dsi->panel->funcs && dsi->panel->funcs->disable) {
+			ret = dsi->panel->funcs->disable(dsi->panel);
+			if (ret) {
+				dw_mipi_dsi_abort_before_crtc(bridge, ret);
+				return;
+			}
+		}
+	}
+
 
 	new_crtc = dw_mipi_dsi_get_new_crtc(dsi, old_state);
 	if (new_crtc)
 		new_crtc_state = drm_atomic_get_new_crtc_state(old_state, new_crtc);
 
-	if (!new_crtc_state || !new_crtc_state->self_refresh_active) {
+	if (!pdata->prepare_before_crtc &&
+	    (!new_crtc_state || !new_crtc_state->self_refresh_active)) {
 		if (dsi->panel)
 			drm_panel_disable(dsi->panel);
 	}
+
+	if (dsi->plat_data->prepare_before_crtc && !dsi->core_active)
+		return;
 
 	if (pdata->stream_standby)
 		pdata->stream_standby(pdata->priv_data, 1);
@@ -992,7 +1103,7 @@ static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
 		drm_mode_copy(&dsi->slave->mode, adjusted_mode);
 }
 
-static void dw_mipi_dsi_pre_enable(struct dw_mipi_dsi *dsi, struct drm_crtc_state *old_crtc_state)
+static int dw_mipi_dsi_pre_enable(struct dw_mipi_dsi *dsi, struct drm_crtc_state *old_crtc_state)
 {
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
 	void *priv_data = dsi->plat_data->priv_data;
@@ -1004,22 +1115,38 @@ static void dw_mipi_dsi_pre_enable(struct dw_mipi_dsi *dsi, struct drm_crtc_stat
 		goto phy_get_lane_rate;
 
 	if (dsi->apb_rst) {
-		reset_control_assert(dsi->apb_rst);
+		dsi->failed_step = "apb-reset-assert";
+		ret = reset_control_assert(dsi->apb_rst);
+		if (ret)
+			return ret;
 		usleep_range(10, 20);
-		reset_control_deassert(dsi->apb_rst);
+		dsi->failed_step = "apb-reset-release";
+		ret = reset_control_deassert(dsi->apb_rst);
+		if (ret)
+			return ret;
 	}
 
 phy_get_lane_rate:
+	dsi->failed_step = "lane-rate";
 	ret = phy_ops->get_lane_mbps(priv_data, adjusted_mode, dsi->mode_flags,
 				     lanes, dsi->format, &dsi->lane_mbps);
 	if (ret)
-		DRM_DEBUG_DRIVER("Phy get_lane_mbps() failed\n");
+		return ret;
 
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
 		goto phy_power_on;
 
-	pm_runtime_get_sync(dsi->dev);
-	dw_mipi_dsi_init(dsi);
+	dsi->failed_step = "dsi-runtime-power";
+	ret = pm_runtime_get_sync(dsi->dev);
+	if (ret < 0) {
+		pm_runtime_put_noidle(dsi->dev);
+		return ret;
+	}
+	dsi->core_active = true;
+	dsi->failed_step = "dsi-host-clocks";
+	ret = dw_mipi_dsi_init(dsi);
+	if (ret)
+		return ret;
 	dw_mipi_dsi_dpi_config(dsi, adjusted_mode);
 	dw_mipi_dsi_packet_handler_config(dsi);
 	dw_mipi_dsi_video_mode_config(dsi);
@@ -1029,23 +1156,36 @@ phy_get_lane_rate:
 	dw_mipi_dsi_vertical_timing_config(dsi, adjusted_mode);
 
 	dw_mipi_dsi_dphy_init(dsi);
-	dw_mipi_dsi_dphy_timing_config(dsi);
+	dsi->failed_step = "dphy-timings";
+	ret = dw_mipi_dsi_dphy_timing_config(dsi);
+	if (ret)
+		return ret;
 	dw_mipi_dsi_dphy_interface_config(dsi);
 
 	dw_mipi_dsi_clear_err(dsi);
 
 phy_power_on:
+	dsi->failed_step = "phy-mode-config";
 	ret = phy_ops->init(priv_data);
 	if (ret)
-		DRM_DEBUG_DRIVER("Phy init() failed\n");
+		return ret;
 
-	if (phy_ops->power_on)
-		phy_ops->power_on(dsi->plat_data->priv_data);
+	if (phy_ops->power_on_checked) {
+		dsi->failed_step = "phy-power-on";
+		ret = phy_ops->power_on_checked(priv_data);
+		if (ret)
+			return ret;
+	} else if (phy_ops->power_on) {
+		phy_ops->power_on(priv_data);
+	}
 
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
 		goto psr_out;
 
-	dw_mipi_dsi_dphy_enable(dsi);
+	dsi->failed_step = "phy-lock-stop-state";
+	ret = dw_mipi_dsi_dphy_enable(dsi);
+	if (ret)
+		return ret;
 
 	dw_mipi_dsi_wait_for_two_frames(adjusted_mode);
 
@@ -1054,7 +1194,8 @@ phy_power_on:
 
 psr_out:
 	if (dsi->slave)
-		dw_mipi_dsi_pre_enable(dsi->slave, old_crtc_state);
+		return dw_mipi_dsi_pre_enable(dsi->slave, old_crtc_state);
+	return 0;
 }
 
 static void dw_mipi_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
@@ -1071,11 +1212,24 @@ static void dw_mipi_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 		return;
 
 	old_crtc_state = drm_atomic_get_old_crtc_state(old_state, crtc);
+	if (dsi->plat_data->prepare_before_crtc) {
+		/* The VOP must have performed the checked call before scanout. */
+		if (!dsi->checked_attempted) {
+			int ret = dw_mipi_dsi_stop_before_off(dsi);
+
+			if (!ret)
+				dw_mipi_dsi_abort_before_crtc(bridge, -EPERM);
+			else
+				dw_mipi_dsi_latch_failure(dsi, ret, "missing-preflight-vop-stop");
+		}
+		return;
+	}
 
 	if (pdata->stream_standby)
 		pdata->stream_standby(pdata->priv_data, 1);
 
-	dw_mipi_dsi_pre_enable(dsi, old_crtc_state);
+	if (dw_mipi_dsi_pre_enable(dsi, old_crtc_state))
+		return;
 
 	/* Don't touch the panel if we're coming back from PSR */
 	if (old_crtc_state && old_crtc_state->self_refresh_active)
@@ -1118,6 +1272,11 @@ static void dw_mipi_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
 	const struct dw_mipi_dsi_plat_data *pdata = dsi->plat_data;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *old_crtc_state = NULL;
+	int ret;
+	if (dsi->plat_data->prepare_before_crtc &&
+		(!dsi->checked_attempted || dsi->checked_error)) {
+		return;
+	}
 
 	crtc = dw_mipi_dsi_get_new_crtc(dsi, old_state);
 	if (crtc)
@@ -1126,15 +1285,41 @@ static void dw_mipi_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
 	if (dsi->support_psr && old_crtc_state && old_crtc_state->self_refresh_active)
 		dev_info(dsi->dev, "%s:%d:psr exit\n", __func__, __LINE__);
 
+	if (dsi->adopted_loader)
+		goto checked_frame;
 	dw_mipi_dsi_enable(dsi, old_crtc_state);
+checked_frame:
+	if (pdata->prepare_before_crtc) {
+		ret = pdata->frame_ready ? pdata->frame_ready(pdata->priv_data) : -EOPNOTSUPP;
+		if (ret) {
+			int stop = dw_mipi_dsi_stop_before_off(dsi);
+			if (!stop)
+				dw_mipi_dsi_abort_before_crtc(bridge, ret);
+			else
+				dw_mipi_dsi_latch_failure(dsi, stop, "first-frame-stop");
+			return;
+		}
+		rockchip_logo_first_frame();
+	}
+
 
 	if (pdata->stream_standby)
 		pdata->stream_standby(pdata->priv_data, 0);
 
 	/* Don't touch the panel if we're coming back from PSR */
 	if (!old_crtc_state || !old_crtc_state->self_refresh_active) {
-		if (dsi->panel)
-			drm_panel_enable(dsi->panel);
+		if (dsi->panel) {
+			ret = drm_panel_enable(dsi->panel);
+			if (ret && pdata->prepare_before_crtc) {
+				int stop = dw_mipi_dsi_stop_before_off(dsi);
+
+				if (!stop)
+					dw_mipi_dsi_abort_before_crtc(bridge, ret);
+				else
+					dw_mipi_dsi_latch_failure(dsi, stop, "backlight-fail-vop-stop");
+				return;
+			}
+		}
 	}
 
 	DRM_DEV_INFO(dsi->dev, "final DSI-Link bandwidth: %u x %d Mbps\n",
@@ -1190,6 +1375,157 @@ static const struct drm_bridge_funcs dw_mipi_dsi_bridge_funcs = {
 	.atomic_disable      = dw_mipi_dsi_bridge_atomic_disable,
 };
 
+bool dw_mipi_dsi_needs_checked_prepare(struct drm_bridge *bridge)
+{
+	struct dw_mipi_dsi *dsi;
+
+	if (!bridge || bridge->funcs != &dw_mipi_dsi_bridge_funcs)
+		return false;
+	dsi = bridge_to_dsi(bridge);
+	return dsi->plat_data->prepare_before_crtc;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_needs_checked_prepare);
+
+/* An entirely cold host need not generate a VOP hold interrupt: actual
+ * PWR_UP=0 and PHY reset/clock bits=0 already disconnect every video pixel.
+ * Runtime resume here only acquires host clocks; it never initializes DSI.
+ */
+int dw_mipi_dsi_output_is_off(struct drm_bridge *bridge)
+{
+ struct dw_mipi_dsi *dsi;int ret,off;
+ if(!dw_mipi_dsi_needs_checked_prepare(bridge))return 0;
+ dsi=bridge_to_dsi(bridge);
+ if(dsi->slave || dsi->next_bridge)return 0;
+ ret=pm_runtime_get_sync(dsi->dev);
+ if(ret<0){pm_runtime_put_noidle(dsi->dev);return ret;}
+ off=!(dsi_read(dsi,DSI_PWR_UP)&1) && !(dsi_read(dsi,DSI_PHY_RSTZ)&0xf);
+ pm_runtime_put(dsi->dev);return off;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_output_is_off);
+
+int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge,const struct drm_display_mode *mode)
+{
+ struct dw_mipi_dsi *dsi;const struct dw_mipi_dsi_phy_ops *ops;
+ u32 cmd,video,lp;int ret;
+ if(!dw_mipi_dsi_needs_checked_prepare(bridge) || rockchip_logo_match_mode(mode))
+  return -EINVAL;
+ dsi=bridge_to_dsi(bridge);ops=dsi->plat_data->phy_ops;
+ if(dsi->slave || dsi->next_bridge || !dsi->panel || !ops->adopt_loader || !ops->hold_loader ||
+    dsi->core_active || dsi->checked_latched_error)return -EOPNOTSUPP;
+ ret=pm_runtime_get_sync(dsi->dev);
+ if(ret<0){pm_runtime_put_noidle(dsi->dev);return ret;}
+ dsi->core_active=true;
+ ret=ops->hold_loader(dsi->plat_data->priv_data,true);if(ret)return ret;
+ dsi->loader_access_held=true;
+ ret=rockchip_logo_check_registers(7,A36_LOGO_HW_COUNT-7);
+ if(ret)return ret;
+ if(dsi_read(dsi,DSI_PWR_UP)!=1 || dsi_read(dsi,DSI_MODE_CFG)!=0 ||
+    !(dsi_read(dsi,DSI_PHY_STATUS)&PHY_LOCK) ||
+    (dsi_read(dsi,DSI_VID_PKT_SIZE)&0x3fff)!=mode->hdisplay)
+  return -EIO;
+ cmd=dsi_read(dsi,DSI_CMD_MODE_CFG);video=dsi_read(dsi,DSI_VID_MODE_CFG);
+ lp=dsi_read(dsi,DSI_LPCLK_CTRL);
+ ret=panel_simple_verify_loader(dsi->panel);
+ dsi_write(dsi,DSI_CMD_MODE_CFG,cmd);dsi_write(dsi,DSI_VID_MODE_CFG,video);
+ dsi_write(dsi,DSI_LPCLK_CTRL,lp);
+ if(ret)return ret;
+ ret=rockchip_logo_check_registers(7,A36_LOGO_HW_COUNT-7);if(ret)return ret;
+ ret=ops->adopt_loader(dsi->plat_data->priv_data);if(ret)return ret;
+ ret=panel_simple_loader_protect(dsi->panel);if(ret)return ret;
+ ops->hold_loader(dsi->plat_data->priv_data,false);
+ dsi->loader_access_held=false;
+ drm_mode_copy(&dsi->mode,mode);
+ dsi->checked_attempted=true;dsi->checked_error=0;dsi->adopted_loader=true;
+ DRM_DEV_INFO(dsi->dev,"LOGO32: live panel/host/PHY/clock proof accepted; no reset\n");
+ return 0;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_adopt_loader);
+
+int dw_mipi_dsi_blank_before_prepare(struct drm_bridge *bridge)
+{
+	struct dw_mipi_dsi *dsi;
+	int ret;
+
+	if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+		return 0;
+	dsi = bridge_to_dsi(bridge);
+	if (!dsi->panel)
+		return -EOPNOTSUPP;
+	if (dsi->checked_latched_error)
+		return dsi->checked_latched_error;
+	ret = backlight_disable(dsi->panel->backlight);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_blank_before_prepare);
+
+void dw_mipi_dsi_abort_before_crtc(struct drm_bridge *bridge, int error)
+{
+	struct dw_mipi_dsi *dsi;
+	int ret;
+
+	if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+		return;
+	dsi = bridge_to_dsi(bridge);
+	if (!dsi->failed_step)
+		dsi->failed_step = "preflight";
+	dw_mipi_dsi_latch_failure(dsi, error, dsi->failed_step);
+	if (dsi->fault_cleaned)
+		return;
+	dsi->fault_cleaned = true;
+	/* Caller has a strict stop acknowledgement; no exit-DCS retries. */
+	if (dsi->panel)
+		panel_simple_safety_abort(dsi->panel, error, dsi->failed_step);
+	ret = dw_mipi_dsi_post_disable(dsi, NULL);
+	if (ret)
+		DRM_DEV_ERROR(dsi->dev, "PANEL-SAFE: PHY off request failed %d; VOP stays stopped\n", ret);
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_abort_before_crtc);
+
+int dw_mipi_dsi_prepare_before_crtc(struct drm_bridge *bridge,
+				  struct drm_atomic_state *state)
+{
+	struct dw_mipi_dsi *dsi;
+	int ret;
+
+	if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+		return 0;
+	dsi = bridge_to_dsi(bridge);
+	if (dsi->checked_latched_error)
+		return dsi->checked_latched_error;
+	if (dsi->checked_attempted)
+		return dsi->checked_error;
+	if (dsi->core_active && !dsi->adopted_loader) {
+		ret = dw_mipi_dsi_post_disable(dsi, NULL);
+		if (ret)
+			return ret;
+	}
+	dsi->checked_attempted = true;
+	if (dsi->slave || dsi->next_bridge || !dsi->panel ||
+	    !dsi->panel->funcs || !dsi->panel->funcs->prepare ||
+	    !dsi->panel->funcs->enable || dsi->plat_data->stream_standby) {
+		dsi->failed_step = "unsupported-panel-route";
+		ret = -EOPNOTSUPP;
+		goto failed;
+	}
+	ret = dw_mipi_dsi_pre_enable(dsi, NULL);
+	if (!ret) {
+		dsi->failed_step = "panel-prepare";
+		ret = drm_panel_prepare(dsi->panel);
+	}
+	if (!ret && dsi->panel->funcs && dsi->panel->funcs->enable) {
+		dsi->failed_step = "panel-enable";
+		ret = dsi->panel->funcs->enable(dsi->panel);
+	}
+failed:
+	if (ret)
+		dw_mipi_dsi_abort_before_crtc(bridge, ret);
+	else
+		DRM_DEV_INFO(dsi->dev, "PANEL-SAFE: real init complete before CRTC enable\n");
+	dsi->checked_error = ret;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_prepare_before_crtc);
+
 #ifdef CONFIG_DEBUG_FS
 
 static int dw_mipi_dsi_debugfs_write(void *data, u64 val)
@@ -1202,6 +1538,11 @@ static int dw_mipi_dsi_debugfs_write(void *data, u64 val)
 		return -ENODEV;
 
 	dsi = vpg->dsi;
+	/* Raw video-pattern writes cannot participate in checked panel init. */
+	if (dsi->plat_data->prepare_before_crtc)
+		return -EOPNOTSUPP;
+	if (dsi->checked_latched_error)
+		return dsi->checked_latched_error;
 
 	*vpg->reg = (bool)val;
 
