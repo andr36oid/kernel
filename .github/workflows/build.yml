@@ -16,6 +16,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,3 +107,17 @@ jobs:
         with:
           name: darkosen-kernel-${{ env.KREL }}
           path: dist/
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          SHORT=$(git -C kernel rev-parse --short=8 HEAD)
+          gh release create "$STAMP" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Kernel $KREL dArkOSen, $STAMP ($SHORT)" \
+            --notes "Built from $GITHUB_SHA by workflow run $GITHUB_RUN_ID." \
+            --latest
