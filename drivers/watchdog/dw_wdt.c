@@ -80,7 +80,10 @@ struct dw_wdt_timeout {
 	unsigned int msec;
 };
 
+#include "a36_trial.h"
+
 struct dw_wdt {
+	struct a36_trial_watchdog trial;
 	void __iomem		*regs;
 	struct clk		*clk;
 	struct clk		*pclk;
@@ -388,6 +391,9 @@ static int dw_wdt_suspend(struct device *dev)
 {
 	struct dw_wdt *dw_wdt = dev_get_drvdata(dev);
 
+	if (dw_wdt->trial.active)
+		return -EBUSY;
+
 	dw_wdt->control = readl(dw_wdt->regs + WDOG_CONTROL_REG_OFFSET);
 	dw_wdt->timeout = readl(dw_wdt->regs + WDOG_TIMEOUT_RANGE_REG_OFFSET);
 
@@ -400,7 +406,11 @@ static int dw_wdt_suspend(struct device *dev)
 static int dw_wdt_resume(struct device *dev)
 {
 	struct dw_wdt *dw_wdt = dev_get_drvdata(dev);
-	int err = clk_prepare_enable(dw_wdt->clk);
+	int err;
+
+	if (dw_wdt->trial.active)
+		return 0;
+	err = clk_prepare_enable(dw_wdt->clk);
 
 	if (err)
 		return err;
@@ -562,6 +572,12 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 	struct dw_wdt *dw_wdt;
 	int ret;
 
+	/* The existing suspend/awake watchdog remains the sole normal owner.
+	 * A trial skips that driver before it touches the peripheral.
+	 */
+	if (IS_ENABLED(CONFIG_ANDR36OID_SLEEP_WDT) && !a36_trial_limit)
+		return -ENODEV;
+
 	dw_wdt = devm_kzalloc(dev, sizeof(*dw_wdt), GFP_KERNEL);
 	if (!dw_wdt)
 		return -ENOMEM;
@@ -625,20 +641,25 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 	 * pending either until the next watchdog kick event or up to the
 	 * system reset.
 	 */
-	ret = platform_get_irq_optional(pdev, 0);
-	if (ret > 0) {
-		ret = devm_request_irq(dev, ret, dw_wdt_irq,
-				       IRQF_SHARED | IRQF_TRIGGER_RISING,
-				       pdev->name, dw_wdt);
-		if (ret)
-			goto out_disable_pclk;
-
-		dw_wdt->wdd.info = &dw_wdt_pt_ident;
-	} else {
-		if (ret == -EPROBE_DEFER)
-			goto out_disable_pclk;
-
+	if (a36_trial_limit) {
+		/* A strict trial uses reset mode only and has no core/cdev owner. */
 		dw_wdt->wdd.info = &dw_wdt_ident;
+	} else {
+		ret = platform_get_irq_optional(pdev, 0);
+		if (ret > 0) {
+			ret = devm_request_irq(dev, ret, dw_wdt_irq,
+					       IRQF_SHARED | IRQF_TRIGGER_RISING,
+					       pdev->name, dw_wdt);
+			if (ret)
+				goto out_disable_pclk;
+	
+			dw_wdt->wdd.info = &dw_wdt_pt_ident;
+		} else {
+			if (ret == -EPROBE_DEFER)
+				goto out_disable_pclk;
+	
+			dw_wdt->wdd.info = &dw_wdt_ident;
+		}
 	}
 
 	reset_control_deassert(dw_wdt->rst);
@@ -676,6 +697,16 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 
 	watchdog_set_restart_priority(wdd, 128);
 
+	/* Strict trials never register /dev/watchdog: userspace cannot take
+	 * ownership, stop it, or change its fixed deadline.
+	 */
+	ret = a36_trial_begin(&dw_wdt->trial, dev, dw_wdt->regs,
+			      dw_wdt->rate);
+	if (ret < 0)
+		goto out_disable_pclk;
+	if (ret > 0)
+		return 0;
+
 	ret = watchdog_register_device(wdd);
 	if (ret)
 		goto out_assert_rst;
@@ -685,12 +716,18 @@ static int dw_wdt_drv_probe(struct platform_device *pdev)
 	return 0;
 
 out_assert_rst:
+	if (a36_trial_limit)
+		return ret; /* Do not disarm the loader watchdog on probe failure. */
 	reset_control_assert(dw_wdt->rst);
 
 out_disable_pclk:
+	if (a36_trial_limit)
+		return ret; /* Retain live clock(s) so the loader timer still expires. */
 	clk_disable_unprepare(dw_wdt->pclk);
 
 out_disable_clk:
+	if (a36_trial_limit)
+		return ret; /* Retain live clock(s) so the loader timer still expires. */
 	clk_disable_unprepare(dw_wdt->clk);
 	return ret;
 }
@@ -701,6 +738,10 @@ static int dw_wdt_drv_remove(struct platform_device *pdev)
 
 	dw_wdt_dbgfs_clear(dw_wdt);
 
+	if (dw_wdt->trial.active) {
+		a36_trial_remove(&dw_wdt->trial);
+		return 0; /* Keep hardware and clocks live; unbind cannot extend. */
+	}
 	watchdog_unregister_device(&dw_wdt->wdd);
 	reset_control_assert(dw_wdt->rst);
 	clk_disable_unprepare(dw_wdt->pclk);
@@ -727,7 +768,35 @@ static struct platform_driver dw_wdt_driver = {
 	},
 };
 
-module_platform_driver(dw_wdt_driver);
+/* Trial takeover precedes device-init probes that may block. Ordinary boots
+ * keep the original module/device-init registration order.
+ */
+static bool dw_wdt_registered;
+static int __init dw_wdt_register(void)
+{
+	int ret;
+
+	if (dw_wdt_registered)
+		return 0;
+	ret = platform_driver_register(&dw_wdt_driver);
+	if (!ret)
+		dw_wdt_registered = true;
+	return ret;
+}
+#ifndef MODULE
+static int __init dw_wdt_trial_init(void)
+{
+	return a36_trial_limit ? dw_wdt_register() : 0;
+}
+subsys_initcall(dw_wdt_trial_init);
+#endif
+module_init(dw_wdt_register);
+static void __exit dw_wdt_unregister(void)
+{
+	if (dw_wdt_registered)
+		platform_driver_unregister(&dw_wdt_driver);
+}
+module_exit(dw_wdt_unregister);
 
 MODULE_AUTHOR("Jamie Iles");
 MODULE_DESCRIPTION("Synopsys DesignWare Watchdog Driver");

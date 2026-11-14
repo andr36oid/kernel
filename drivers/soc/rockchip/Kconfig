@@ -342,9 +342,8 @@ config ANDR36OID_STATUS_LED
 config ANDR36OID_SLEEP_WDT
 	bool "Hardware watchdog during suspend and resume"
 	depends on ARCH_ROCKCHIP && PM_SLEEP && COMMON_CLK && RESET_CONTROLLER
-	depends on !DW_WATCHDOG
 	help
 	  Arms the SoC watchdog while devices suspend and resume and watches
 	  stalled awake timers and shutdown. It is stopped during system sleep.
-	  The driver owns the disabled snps,dw-wdt node directly; do not combine
-	  it with the standard DW_WATCHDOG driver.
+	  Normal boots use this driver exclusively. A strict a36_trial_limit
+	  boot hands the hardware to DW_WATCHDOG before any register access.

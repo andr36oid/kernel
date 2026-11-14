@@ -29,6 +29,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/a36_kernel_trial.h>
 #include <linux/clk-provider.h>
 #include <linux/hrtimer.h>
 #include <linux/cpu.h>
@@ -669,6 +670,10 @@ static int __init sleep_wdt_init(void)
 {
 	struct platform_device *pdev;
 	int ret;
+
+	/* Exclusive ownership: never reset, disarm or kick a strict trial. */
+	if (a36_kernel_trial_requested())
+		return 0;
 
 	register_pm_notifier(&sleep_cpus_pm_nb);
 
