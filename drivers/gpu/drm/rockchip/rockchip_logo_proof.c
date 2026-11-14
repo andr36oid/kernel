@@ -113,7 +113,11 @@ int rockchip_logo_match_mode(const struct drm_display_mode *m)
  if(rockchip_logo_copy_proof(p))return -ENODATA;
  v[0]=m->clock*1000U;v[1]=m->hdisplay;v[2]=m->hsync_start;v[3]=m->hsync_end;v[4]=m->htotal;
  v[5]=m->vdisplay;v[6]=m->vsync_start;v[7]=m->vsync_end;v[8]=m->vtotal;v[9]=m->flags;
- for(i=0;i<10;i++)if(v[i]!=a36_logo_get(p,A36_L_CLOCK+i))return -EINVAL;
+ for(i=0;i<10;i++)if(v[i]!=a36_logo_get(p,A36_L_CLOCK+i)) {
+  pr_info("LOGO41: mode mismatch field=%d actual=%u expected=%u\n",
+          i,v[i],a36_logo_get(p,A36_L_CLOCK+i));
+  return -EINVAL;
+ }
  return 0;
 }
 EXPORT_SYMBOL_GPL(rockchip_logo_match_mode);
@@ -140,9 +144,18 @@ int rockchip_logo_check_registers(unsigned int first,unsigned int count)
     rockchip_logo_copy_proof(proof))return -EINVAL;
  for(i=first;i<first+count;i++) {
   reg=ioremap(a36_logo_registers[i].address,4);
-  if(!reg)return -ENOMEM;
+  if(!reg) {
+   pr_info("LOGO41: live register map failed index=%u address=%#x errno=%d\n",
+           i,a36_logo_registers[i].address,-ENOMEM);
+   return -ENOMEM;
+  }
   value=readl(reg)&a36_logo_registers[i].mask;iounmap(reg);
-  if(value!=a36_logo_get(proof,A36_L_HW+i))return -ESTALE;
+  if(value!=a36_logo_get(proof,A36_L_HW+i)) {
+   pr_info("LOGO41: live register mismatch index=%u address=%#x mask=%#x actual=%#x expected=%#x errno=%d\n",
+           i,a36_logo_registers[i].address,a36_logo_registers[i].mask,
+           value,a36_logo_get(proof,A36_L_HW+i),-ESTALE);
+   return -ESTALE;
+  }
  }
  return 0;
 }

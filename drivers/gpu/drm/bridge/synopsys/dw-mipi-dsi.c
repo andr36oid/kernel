@@ -1406,38 +1406,60 @@ EXPORT_SYMBOL_GPL(dw_mipi_dsi_output_is_off);
 int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge,const struct drm_display_mode *mode)
 {
  struct dw_mipi_dsi *dsi;const struct dw_mipi_dsi_phy_ops *ops;
- u32 cmd,video,lp;int ret;
- if(!dw_mipi_dsi_needs_checked_prepare(bridge) || rockchip_logo_match_mode(mode))
+ const char *step="eligibility";u32 cmd,video,lp;int ret;
+ if(!dw_mipi_dsi_needs_checked_prepare(bridge) || rockchip_logo_match_mode(mode)) {
+  pr_info("LOGO41: DSI live reject step=bridge-or-mode errno=%d\n",-EINVAL);
   return -EINVAL;
+ }
  dsi=bridge_to_dsi(bridge);ops=dsi->plat_data->phy_ops;
  if(dsi->slave || dsi->next_bridge || !dsi->panel || !ops->adopt_loader || !ops->hold_loader ||
-    dsi->core_active || dsi->checked_latched_error)return -EOPNOTSUPP;
+    dsi->core_active || dsi->checked_latched_error) {
+  DRM_DEV_INFO(dsi->dev,"LOGO41: eligibility slave=%d next=%d panel=%d adopt=%d hold=%d active=%d latched=%d\n",
+   !!dsi->slave,!!dsi->next_bridge,!!dsi->panel,!!ops->adopt_loader,!!ops->hold_loader,
+   dsi->core_active,dsi->checked_latched_error);
+  ret=-EOPNOTSUPP;goto reject;
+ }
+ step="host-power-reference";
  ret=pm_runtime_get_sync(dsi->dev);
- if(ret<0){pm_runtime_put_noidle(dsi->dev);return ret;}
+ if(ret<0){pm_runtime_put_noidle(dsi->dev);goto reject;}
  dsi->core_active=true;
- ret=ops->hold_loader(dsi->plat_data->priv_data,true);if(ret)return ret;
+ step="phy-access-references";
+ ret=ops->hold_loader(dsi->plat_data->priv_data,true);if(ret)goto reject;
  dsi->loader_access_held=true;
+ step="register-snapshot-before-dcs";
  ret=rockchip_logo_check_registers(7,A36_LOGO_HW_COUNT-7);
- if(ret)return ret;
+ if(ret)goto reject;
+ step="host-power-video-lock-packet";
  if(dsi_read(dsi,DSI_PWR_UP)!=1 || dsi_read(dsi,DSI_MODE_CFG)!=0 ||
     !(dsi_read(dsi,DSI_PHY_STATUS)&PHY_LOCK) ||
-    (dsi_read(dsi,DSI_VID_PKT_SIZE)&0x3fff)!=mode->hdisplay)
-  return -EIO;
+    (dsi_read(dsi,DSI_VID_PKT_SIZE)&0x3fff)!=mode->hdisplay) {
+  DRM_DEV_INFO(dsi->dev,"LOGO41: host power=%#x mode=%#x phy=%#x packet=%#x width=%d\n",
+   dsi_read(dsi,DSI_PWR_UP),dsi_read(dsi,DSI_MODE_CFG),dsi_read(dsi,DSI_PHY_STATUS),
+   dsi_read(dsi,DSI_VID_PKT_SIZE),mode->hdisplay);
+  ret=-EIO;goto reject;
+ }
  cmd=dsi_read(dsi,DSI_CMD_MODE_CFG);video=dsi_read(dsi,DSI_VID_MODE_CFG);
  lp=dsi_read(dsi,DSI_LPCLK_CTRL);
+ step="panel-dcs-status";
  ret=panel_simple_verify_loader(dsi->panel);
  dsi_write(dsi,DSI_CMD_MODE_CFG,cmd);dsi_write(dsi,DSI_VID_MODE_CFG,video);
  dsi_write(dsi,DSI_LPCLK_CTRL,lp);
- if(ret)return ret;
- ret=rockchip_logo_check_registers(7,A36_LOGO_HW_COUNT-7);if(ret)return ret;
- ret=ops->adopt_loader(dsi->plat_data->priv_data);if(ret)return ret;
- ret=panel_simple_loader_protect(dsi->panel);if(ret)return ret;
+ if(ret)goto reject;
+ step="register-snapshot-after-dcs";
+ ret=rockchip_logo_check_registers(7,A36_LOGO_HW_COUNT-7);if(ret)goto reject;
+ step="phy-adopt";
+ ret=ops->adopt_loader(dsi->plat_data->priv_data);if(ret)goto reject;
+ step="panel-resource-adopt";
+ ret=panel_simple_loader_protect(dsi->panel);if(ret)goto reject;
  ops->hold_loader(dsi->plat_data->priv_data,false);
  dsi->loader_access_held=false;
  drm_mode_copy(&dsi->mode,mode);
  dsi->checked_attempted=true;dsi->checked_error=0;dsi->adopted_loader=true;
  DRM_DEV_INFO(dsi->dev,"LOGO32: live panel/host/PHY/clock proof accepted; no reset\n");
  return 0;
+reject:
+ DRM_DEV_INFO(dsi->dev,"LOGO41: DSI live reject step=%s errno=%d\n",step,ret);
+ return ret;
 }
 EXPORT_SYMBOL_GPL(dw_mipi_dsi_adopt_loader);
 

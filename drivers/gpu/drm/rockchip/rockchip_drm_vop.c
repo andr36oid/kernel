@@ -2754,24 +2754,45 @@ static int vop_panel_frame_ready(struct drm_crtc *crtc)
 static int vop_loader_validate(struct drm_crtc *crtc)
 {
  struct vop *vop=to_vop(crtc);u8 p[A36_LOGO_BYTES];int ret,i,found=0;
- u32 address;u64 base;
+ const char *step="soc-and-proof";u32 address;u64 base;
  if(vop->data->soc_id!=0x3326 || vop->data->vop_id!=0 ||
-    rockchip_logo_copy_proof(p))return -EOPNOTSUPP;
- vop_lock(vop);ret=vop_power_enable(crtc);vop_unlock(vop);if(ret)return ret;
- ret=rockchip_logo_check_registers(0,7);if(ret)return ret;
- if(VOP_CTRL_GET(vop,standby) || !VOP_CTRL_GET(vop,mipi_en))return -EINVAL;
+    rockchip_logo_copy_proof(p)) {ret=-EOPNOTSUPP;goto reject;}
+ step="power-references";
+ vop_lock(vop);ret=vop_power_enable(crtc);vop_unlock(vop);if(ret)goto reject;
+ step="register-snapshot";
+ ret=rockchip_logo_check_registers(0,7);if(ret)goto reject;
+ step="standby-or-output";
+ if(VOP_CTRL_GET(vop,standby) || !VOP_CTRL_GET(vop,mipi_en)) {
+  dev_info(vop->dev,"LOGO41: live standby=%u mipi_enabled=%u expected=0/1\n",
+   VOP_CTRL_GET(vop,standby),VOP_CTRL_GET(vop,mipi_en));
+  ret=-EINVAL;goto reject;
+ }
  base=((u64)a36_logo_get(p,A36_L_BASE_HI)<<32)|a36_logo_get(p,A36_L_BASE_LO);
- base+=a36_logo_get(p,A36_L_OFFSET);if(base>U32_MAX)return -ERANGE;
+ base+=a36_logo_get(p,A36_L_OFFSET);
+ step="framebuffer-address-range";
+ if(base>U32_MAX) {ret=-ERANGE;goto reject;}
  for(i=0;i<vop->num_wins;i++) {
   struct vop_win *win=&vop->win[i];
   if(!vop_read_reg(vop,win->offset,&VOP_WIN_NAME(win,enable)))continue;
   address=vop_read_reg(vop,win->offset,&VOP_WIN_NAME(win,yrgb_mst));
-  if(address!=(u32)base)return -EINVAL;
+  dev_info(vop->dev,"LOGO41: live window=%d address=%#x expected=%#x\n",i,address,(u32)base);
+  step="window-address";
+  if(address!=(u32)base) {ret=-EINVAL;goto reject;}
   found++;
  }
- if(found!=1)return -EINVAL;
+ step="enabled-window-count";
+ if(found!=1) {
+  dev_info(vop->dev,"LOGO41: live enabled_windows=%d expected=1\n",found);
+  ret=-EINVAL;goto reject;
+ }
  drm_crtc_vblank_on(crtc);
- return vop_panel_frame_ready(crtc);
+ step="frame-irq";
+ ret=vop_panel_frame_ready(crtc);
+ if(ret)goto reject;
+ return 0;
+reject:
+ dev_info(vop->dev,"LOGO41: VOP live reject step=%s errno=%d\n",step,ret);
+ return ret;
 }
 
 static int vop_crtc_loader_protect(struct drm_crtc *crtc, bool on, void *data)

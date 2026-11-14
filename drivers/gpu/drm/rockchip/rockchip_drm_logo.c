@@ -855,19 +855,40 @@ static int setup_initial_state(struct drm_device *drm_dev,
 	if (set->sub_dev->guarded_panel_init) {
 		struct drm_bridge *bridge = drm_bridge_chain_get_first_bridge(conn_state->best_encoder);
 		int blank;
+		const char *failed_step = "no-mode";
+		int checked_modes = 0;
+		ret = -ENOENT;
+		dev_info(drm_dev->dev, "LOGO41: live adoption begin modes=%d fb=%d validator=%d\n",
+			 num_modes, !!set->fb,
+			 !!(priv->crtc_funcs[pipe] && priv->crtc_funcs[pipe]->loader_validate));
 		list_for_each_entry(mode, &connector->modes, head) {
-			if (mode->status != MODE_OK)
+			if (mode->status != MODE_OK) {
+				dev_info(drm_dev->dev, "LOGO41: skip mode=%s status=%d\n",
+					 mode->name, mode->status);
 				continue;
+			}
+			checked_modes++;
 			drm_mode_copy(&adj_mode, mode);
 			rockchip_drm_mode_fixup(crtc_state, conn_state, &adj_mode);
-			if (rockchip_logo_match_mode(&adj_mode))
+			failed_step = "mode-contract";
+			ret = rockchip_logo_match_mode(&adj_mode);
+			if (ret)
 				continue;
+			dev_info(drm_dev->dev, "LOGO41: mode contract pass mode=%s clock=%d flags=%#x\n",
+				 mode->name, adj_mode.clock, adj_mode.flags);
 			if (!set->fb || !priv->crtc_funcs[pipe] ||
-			    !priv->crtc_funcs[pipe]->loader_validate)
+			    !priv->crtc_funcs[pipe]->loader_validate) {
+				failed_step = "framebuffer-or-validator";
+				ret = -EOPNOTSUPP;
 				break;
+			}
+			failed_step = "vop-live";
 			ret = priv->crtc_funcs[pipe]->loader_validate(crtc);
-			if (!ret)
+			if (!ret) {
+				dev_info(drm_dev->dev, "LOGO41: VOP live validation pass\n");
+				failed_step = "dsi-live";
 				ret = dw_mipi_dsi_adopt_loader(bridge, &adj_mode);
+			}
 			if (ret)
 				break;
 			set->loader_proven = true;
@@ -880,6 +901,8 @@ static int setup_initial_state(struct drm_device *drm_dev,
 		/* No valid proof is NOT an init failure: stop and run checked init.
 		 * Clear early backlight/PHY adoption permission before any cold reset.
 		 */
+		dev_info(drm_dev->dev, "LOGO41: adoption declined step=%s errno=%d checked_modes=%d; checked cold init\n",
+			 failed_step, ret, checked_modes);
 		rockchip_logo_reject();
 
 		blank = dw_mipi_dsi_blank_before_prepare(bridge);
