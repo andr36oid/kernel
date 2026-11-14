@@ -1,4 +1,4 @@
-name: Build dArkOSen 5.10 kernel
+name: Build andr36oid 5.10 kernel
 
 on:
   push:
@@ -9,8 +9,8 @@ on:
 env:
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
-  KBUILD_BUILD_USER: djpar
-  KBUILD_BUILD_HOST: dArkOSen
+  KBUILD_BUILD_USER: kenny
+  KBUILD_BUILD_HOST: andr36oid
   CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
