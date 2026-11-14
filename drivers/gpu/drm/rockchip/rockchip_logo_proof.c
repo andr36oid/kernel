@@ -137,23 +137,84 @@ EXPORT_SYMBOL_GPL(rockchip_logo_adopting_phy);
 void rockchip_logo_first_frame(void){WRITE_ONCE(output_ready,true);}
 EXPORT_SYMBOL_GPL(rockchip_logo_first_frame);
 
+/* The v1 wire snapshot is fixed: do not relabel its indices. In particular,
+ * 27 is VOPB fraction, 29 is VOPL fraction, and 30..33 are DPLL (DDR),
+ * not NPLL. Only VOP0 -> direct DSI is supported by this verifier.
+ *
+ * v1 does not carry NPLL or a trustworthy fractional-rate calculation from
+ * its producer. Fail closed for those sources, rather than pretending an
+ * unrecorded clock is verified. The proven CPLL integer path is checked
+ * against the token's exact pixel frequency as well as its live registers.
+ */
+static int logo_clock_scope(const u8 *proof)
+{
+ u32 sel=a36_logo_get(proof,A36_L_HW+26);
+ u32 con0=a36_logo_get(proof,A36_L_HW+34);
+ u32 con1=a36_logo_get(proof,A36_L_HW+35);
+ u32 mode=a36_logo_get(proof,A36_L_HW+38);
+ u32 fbdiv=con0&0xfff,postdiv1=(con0>>12)&7;
+ u32 refdiv=con1&0x3f,postdiv2=(con1>>6)&7;
+ u64 numerator=24000000ULL*fbdiv;
+ u64 denominator=(u64)refdiv*postdiv1*postdiv2*((sel&0xff)+1);
+ if((sel&0xc800) || ((mode>>2)&3)!=1 || !(con1&(1U<<12))) {
+  pr_info("LOGO42: unsupported v1 clock scope sel5=%#x CPLL_CON1=%#x mode=%#x; checked cold init\n",
+          sel,con1,mode);
+  return -EOPNOTSUPP;
+ }
+ if(!(con1&(1U<<10)) || (con1&(1U<<13)) || !fbdiv || !denominator ||
+    numerator!=(u64)a36_logo_get(proof,A36_L_CLOCK)*denominator) {
+  pr_info("LOGO42: invalid CPLL integer proof con0=%#x con1=%#x sel5=%#x pixel_hz=%u\n",
+          con0,con1,sel,a36_logo_get(proof,A36_L_CLOCK));
+  return -ERANGE;
+ }
+ return 0;
+}
+
+static u32 logo_live_compare_mask(unsigned int index)
+{
+ /* Capture masks remain wire-compatible with the installed U-Boot.
+  * Comparison masks cover the selected path, not inactive CCF branches.
+  */
+ switch(index) {
+ case 26: return 0xc8ff; /* VOPB final mux, PLL parent and integer divisor. */
+ case 27:               /* VOPB fraction is bypassed by this checked scope. */
+ case 28: case 29:      /* VOPL is not this VOP0/DSI scanout's pixel clock. */
+ case 30: case 31: case 32: case 33: /* DPLL is the DDR PLL, not NPLL. */
+ case 36: return 0;     /* CPLL fractional word is bypassed by DSMPD=1. */
+ case 34: return 0x7fff; /* FBDIV and POSTDIV1. */
+ case 35: return 0xb5ff; /* REFDIV/POSTDIV2/LOCK/DSMPD/PD/PDSEL. */
+ case 38: return 0xc;   /* CPLL's MODE_CON field is bits 3:2, not 5:4. */
+ default: return a36_logo_registers[index].mask;
+ }
+}
+
 int rockchip_logo_check_registers(unsigned int first,unsigned int count)
 {
- u8 proof[A36_LOGO_BYTES];unsigned int i;u32 value;void __iomem *reg;
+ u8 proof[A36_LOGO_BYTES];unsigned int i;u32 value,mask,expected;
+ void __iomem *reg;int ret;
  if(first>A36_LOGO_HW_COUNT || count>A36_LOGO_HW_COUNT-first ||
     rockchip_logo_copy_proof(proof))return -EINVAL;
+ /* The first seven words are checked by VOP with its power references.
+  * Remaining words are read only after the DSI/PHY references are held.
+  */
+ if(first+count>26) {
+  ret=logo_clock_scope(proof);if(ret)return ret;
+  pr_info("LOGO42: live clock scope VOPB/CPLL integer; inactive VOPL/DPLL/fractions excluded\n");
+ }
  for(i=first;i<first+count;i++) {
+  mask=logo_live_compare_mask(i);
+  if(!mask)continue;
   reg=ioremap(a36_logo_registers[i].address,4);
   if(!reg) {
    pr_info("LOGO41: live register map failed index=%u address=%#x errno=%d\n",
            i,a36_logo_registers[i].address,-ENOMEM);
    return -ENOMEM;
   }
-  value=readl(reg)&a36_logo_registers[i].mask;iounmap(reg);
-  if(value!=a36_logo_get(proof,A36_L_HW+i)) {
+  value=readl(reg)&mask;iounmap(reg);
+  expected=a36_logo_get(proof,A36_L_HW+i)&mask;
+  if(value!=expected) {
    pr_info("LOGO41: live register mismatch index=%u address=%#x mask=%#x actual=%#x expected=%#x errno=%d\n",
-           i,a36_logo_registers[i].address,a36_logo_registers[i].mask,
-           value,a36_logo_get(proof,A36_L_HW+i),-ESTALE);
+           i,a36_logo_registers[i].address,mask,value,expected,-ESTALE);
    return -ESTALE;
   }
  }
