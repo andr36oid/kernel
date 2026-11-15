@@ -1744,6 +1744,15 @@ int proc_do_static_key(struct ctl_table *table, int write,
 }
 
 static struct ctl_table kern_table[] = {
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+	{
+		.procname = "sched_performance_bias",
+		.data = &sysctl_sched_performance_bias,
+		.maxlen = sizeof(unsigned int),
+		.mode = 0644,
+		.proc_handler = proc_dointvec,
+	},
+#endif
 	{
 		.procname	= "sched_child_runs_first",
 		.data		= &sysctl_sched_child_runs_first,

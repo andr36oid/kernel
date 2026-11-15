@@ -75,6 +75,9 @@ static unsigned int sched_nr_latency = 8;
  * parent will (try to) run first.
  */
 unsigned int sysctl_sched_child_runs_first __read_mostly;
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+unsigned int sysctl_sched_performance_bias __read_mostly = 1;
+#endif
 
 /*
  * SCHED_OTHER wake-up granularity.
@@ -771,6 +774,13 @@ void init_entity_runnable_average(struct sched_entity *se)
 	if (entity_is_task(se))
 		sa->load_avg = scale_load_down(se->load.weight);
 
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+	/* Same seed for task/group entities as the 4.19 Rockchip policy. */
+	if (READ_ONCE(sysctl_sched_performance_bias)) {
+		sa->util_avg = SCHED_CAPACITY_SCALE >> 1;
+		sa->util_sum = sa->util_avg * LOAD_AVG_MAX;
+	}
+#endif
 	/* when this task enqueue'ed, it will contribute to its cfs_rq's load_avg */
 }
 
@@ -810,7 +820,11 @@ void post_init_entity_util_avg(struct task_struct *p)
 	long cpu_scale = arch_scale_cpu_capacity(cpu_of(rq_of(cfs_rq)));
 	long cap = (long)(cpu_scale - cfs_rq->avg.util_avg) / 2;
 
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+	if (!READ_ONCE(sysctl_sched_performance_bias) && cap > 0) {
+#else
 	if (cap > 0) {
+#endif
 		if (cfs_rq->avg.util_avg != 0) {
 			sa->util_avg  = cfs_rq->avg.util_avg * se->load.weight;
 			sa->util_avg /= (cfs_rq->avg.load_avg + 1);
@@ -4205,6 +4219,24 @@ static inline int task_fits_cpu(struct task_struct *p, int cpu)
 	unsigned long util = task_util_est(p);
 	return util_fits_cpu(util, uclamp_min, uclamp_max, cpu);
 }
+
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+/* Adapt 4.19's max-capacity guard to 5.10's scalar root-domain capacity
+ * and existing uclamp API. On homogeneous RK3326 all CPUs are max-capacity.
+ */
+static inline bool rockchip_task_fits_max(struct task_struct *p, int cpu)
+{
+	unsigned long capacity = capacity_of(cpu);
+	unsigned long max_capacity = READ_ONCE(cpu_rq(cpu)->rd->max_cpu_capacity);
+	unsigned long util = task_util_est(p);
+
+	if (capacity == max_capacity || capacity * 1280 > max_capacity * 1024)
+		return true;
+	util = clamp(util, uclamp_eff_value(p, UCLAMP_MIN),
+			   uclamp_eff_value(p, UCLAMP_MAX));
+	return fits_capacity(util, capacity);
+}
+#endif
 
 static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 {
@@ -8125,6 +8157,13 @@ static int detach_tasks(struct lb_env *env)
 			break;
 		}
 
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+		if (READ_ONCE(sysctl_sched_performance_bias) &&
+		    env->idle == CPU_NOT_IDLE &&
+		    !rockchip_task_fits_max(p, env->dst_cpu))
+			goto next;
+#endif
+
 		if (!can_migrate_task(p, env))
 			goto next;
 
@@ -9225,6 +9264,12 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 		if (!cpumask_intersects(sched_group_span(group),
 					p->cpus_ptr))
 			continue;
+
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+		if (READ_ONCE(sysctl_sched_performance_bias) &&
+		    !rockchip_task_fits_max(p, group_first_cpu(group)))
+			continue;
+#endif
 
 		local_group = cpumask_test_cpu(this_cpu,
 					       sched_group_span(group));

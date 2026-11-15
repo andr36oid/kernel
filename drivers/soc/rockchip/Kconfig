@@ -347,3 +347,13 @@ config ANDR36OID_SLEEP_WDT
 	  stalled awake timers and shutdown. It is stopped during system sleep.
 	  Normal boots use this driver exclusively. A strict a36_trial_limit
 	  boot hands the hardware to DW_WATCHDOG before any register access.
+
+config ROCKCHIP_SCHED_PERFORMANCE_BIAS
+	bool "Rockchip task scheduler performance bias"
+	depends on SMP && ARCH_ROCKCHIP
+	default y
+	help
+	  Seed new entities at half CPU utilisation and count runnable waiting
+	  time as busy in PELT, with the Rockchip placement guards. This restores
+	  the 4.19 performance policy and can increase power consumption.
+	  kernel.sched_performance_bias toggles the policy at runtime.

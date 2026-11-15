@@ -30,6 +30,9 @@ extern unsigned int sysctl_sched_latency;
 extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
+#ifdef CONFIG_ROCKCHIP_SCHED_PERFORMANCE_BIAS
+extern unsigned int sysctl_sched_performance_bias;
+#endif
 
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
