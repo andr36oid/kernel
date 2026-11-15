@@ -491,48 +491,19 @@ static int panel_simple_regulator_disable(struct panel_simple *p)
 int panel_simple_verify_loader(struct drm_panel *panel)
 {
  struct panel_simple *p=to_panel_simple(panel);u8 mode=0;unsigned long flags;int ret;
- const char *step="eligibility";
- if(!p->dsi || p->power_invert || p->init_error || p->prepared || p->enabled) {
-  dev_info(panel->dev,"LOGO41: panel eligibility dsi=%d inverted=%d init_error=%d prepared=%d enabled=%d\n",
-   !!p->dsi,p->power_invert,p->init_error,p->prepared,p->enabled);
-  ret=-EOPNOTSUPP;goto reject;
- }
- step="supply-enabled";
- ret=regulator_is_enabled(p->supply);
- if(ret<=0) {
-  dev_info(panel->dev,"LOGO41: panel supply enabled=%d\n",ret);
-  ret=-EIO;goto reject;
- }
- step="reset-released";
- if(p->reset_gpio) {
-  ret=gpiod_get_value_cansleep(p->reset_gpio);
-  if(ret!=0) {
-   dev_info(panel->dev,"LOGO41: panel reset logical=%d expected=0\n",ret);
-   ret=-EIO;goto reject;
-  }
- }
- step="enable-asserted";
- if(p->enable_gpio) {
-  ret=gpiod_get_value_cansleep(p->enable_gpio);
-  if(ret!=1) {
-   dev_info(panel->dev,"LOGO41: panel enable logical=%d expected=1\n",ret);
-   ret=-EIO;goto reject;
-  }
- }
- /* In-video HS read; caller restores host controls before rejecting. */
+ if(!p->dsi || p->power_invert || p->init_error || p->prepared || p->enabled)
+  return -EOPNOTSUPP;
+ if(regulator_is_enabled(p->supply)<=0)return -EIO;
+ if(p->reset_gpio && gpiod_get_value_cansleep(p->reset_gpio)!=0)return -EIO;
+ if(p->enable_gpio && gpiod_get_value_cansleep(p->enable_gpio)!=1)return -EIO;
+ /* Use an in-video DCS read: never run host reset or switch VIDEO_MODE.
+  * Caller saves/restores host LP-command controls and validates readback.
+  */
  flags=p->dsi->mode_flags;p->dsi->mode_flags&=~MIPI_DSI_MODE_LPM;
  ret=mipi_dsi_dcs_read(p->dsi,0x0a,&mode,1);p->dsi->mode_flags=flags;
- step="dcs-read";
- dev_info(panel->dev,"LOGO41: panel DCS 0x0a ret=%d status=%#x flags=%#lx\n",ret,mode,flags);
- if(ret<0)goto reject;
- step="dcs-length";
- if(ret!=1) {ret=-EIO;goto reject;}
- step="dcs-power-bits";
- if((mode&0x1c)!=0x1c) {ret=-EIO;goto reject;}
- return 0;
-reject:
- dev_info(panel->dev,"LOGO41: panel live reject step=%s errno=%d\n",step,ret);
- return ret;
+ if(ret<0)return ret;
+ if(ret!=1)return -EIO;
+ return (mode&0x1c)==0x1c ? 0:-EIO;
 }
 EXPORT_SYMBOL_GPL(panel_simple_verify_loader);
 
