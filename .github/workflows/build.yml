@@ -16,8 +16,14 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavour: vulkan
+            defconfig: andr36oid_rk3326_vulkan_defconfig
+          - flavour: gles
+            defconfig: andr36oid_rk3326_defconfig
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,8 +40,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-5.10-${{ github.sha }}
-          restore-keys: ccache-5.10-
+          key: ccache-5.10-${{ matrix.flavour }}-${{ github.sha }}
+          restore-keys: |
+            ccache-5.10-${{ matrix.flavour }}-
+            ccache-5.10-
 
       - name: Set paths
         run: |
@@ -46,7 +54,7 @@ jobs:
 
       - name: Configure
         working-directory: kernel
-        run: make O=$OUT rockchip_linux_defconfig rk3326_linux.config darkosen.config
+        run: make O=$OUT ${{ matrix.defconfig }}
 
       - name: Build Image and modules
         working-directory: kernel
@@ -92,29 +100,44 @@ jobs:
           done
           rm -f $STAGE/lib/modules/$KREL/build $STAGE/lib/modules/$KREL/source
           depmod -b $STAGE $KREL
-          tar -C $STAGE -czf $GITHUB_WORKSPACE/modules-$KREL.tar.gz lib
+          tar -C $STAGE -czf $GITHUB_WORKSPACE/modules-$KREL-${{ matrix.flavour }}.tar.gz lib
 
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          cp $OUT/arch/arm64/boot/Image dist/
-          cp $OUT/.config dist/config-$KREL
-          cp $OUT/System.map dist/System.map-$KREL
-          mv modules-$KREL.tar.gz dist/
+          cp $OUT/arch/arm64/boot/Image dist/Image-${{ matrix.flavour }}
+          cp $OUT/.config dist/config-$KREL-${{ matrix.flavour }}
+          cp $OUT/System.map dist/System.map-$KREL-${{ matrix.flavour }}
+          mv modules-$KREL-${{ matrix.flavour }}.tar.gz dist/
+          echo "$KREL" > dist/release-${{ matrix.flavour }}.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: andr36oid-kernel-${{ env.KREL }}
+          name: andr36oid-kernel-${{ matrix.flavour }}
           path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
+          KREL=$(cat dist/release-vulkan.txt)
+          rm -f dist/release-*.txt
           STAMP=$(date -u +%Y%m%d-%H%M)
-          SHORT=$(git -C kernel rev-parse --short=8 HEAD)
+          SHORT=$(echo "$GITHUB_SHA" | cut -c1-8)
           gh release create "$STAMP" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
