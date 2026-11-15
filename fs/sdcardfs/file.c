@@ -448,6 +448,8 @@ const struct file_operations sdcardfs_main_fops = {
 	.fasync		= sdcardfs_fasync,
 	.read_iter	= sdcardfs_read_iter,
 	.write_iter	= sdcardfs_write_iter,
+	.splice_read	= generic_file_splice_read,
+	.splice_write	= iter_file_splice_write,
 };
 
 /* trimmed directory options */
