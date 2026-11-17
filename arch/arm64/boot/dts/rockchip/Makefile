@@ -363,3 +363,5 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-k36-panel4-alt.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-k36-panel5.dtb
 
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-k36-panel6.dtb
+
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-r36max-type2.dtb
