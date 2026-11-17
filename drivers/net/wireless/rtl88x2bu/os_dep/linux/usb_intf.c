@@ -300,6 +300,10 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 	{USB_DEVICE_AND_INTERFACE_INFO(0x7392, 0xD822, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* Edimax */
 	{USB_DEVICE_AND_INTERFACE_INFO(0x7392, 0xE822, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* Edimax */
 	{USB_DEVICE_AND_INTERFACE_INFO(0x7392, 0xF822, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* Edimax */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2c4e, 0x010a, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* from mainline rtw88 rtw8822bu.c */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2001, 0x3322, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* from mainline rtw88 rtw8822bu.c */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x0411, 0x03d1, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* from mainline rtw88 rtw8822bu.c */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x0411, 0x03d0, 0xff, 0xff, 0xff), .driver_info = RTL8822B}, /* from mainline rtw88 rtw8822bu.c */
 #endif /* CONFIG_RTL8822B */
 
 #ifdef CONFIG_RTL8723D

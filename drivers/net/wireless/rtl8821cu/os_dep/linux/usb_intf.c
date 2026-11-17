@@ -309,6 +309,9 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xC80C, 0xff, 0xff, 0xff), .driver_info = RTL8821C}, /* 8821CUH */
 	/*=== Customer ID ===*/
 	{USB_DEVICE_AND_INTERFACE_INFO(0x2001, 0x331d, 0xff, 0xff, 0xff), .driver_info = RTL8821C}, /* D-Link - DWA-171C */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x7392, 0xc811, 0xff, 0xff, 0xff), .driver_info = RTL8821C}, /* from mainline rtw88 rtw8821cu.c */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x7392, 0xd811, 0xff, 0xff, 0xff), .driver_info = RTL8821C}, /* from mainline rtw88 rtw8821cu.c */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2c4e, 0x0105, 0xff, 0xff, 0xff), .driver_info = RTL8821C}, /* from mainline rtw88 rtw8821cu.c */
 #endif
 
 #ifdef CONFIG_RTL8710B

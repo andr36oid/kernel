@@ -254,6 +254,8 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_ASUS, 0x18F1, 0xff, 0xff, 0xff), .driver_info = RTL8192F}, /* 8192FU 2*2 */
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_EDIMAX, 0xB722, 0xff, 0xff, 0xff), .driver_info = RTL8192F}, /* 8192FU 2*2 */
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0x318B, 0xff, 0xff, 0xff), .driver_info = RTL8192F}, /* 8192FU 2*2 */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2357, 0x0135, 0xff, 0xff, 0xff), .driver_info = RTL8192F}, /* TP-Link TL-WN823N V2 / D-Link AN3U, from mainline rtl8xxxu */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2001, 0x3328, 0xff, 0xff, 0xff), .driver_info = RTL8192F}, /* TP-Link TL-WN823N V2 / D-Link AN3U, from mainline rtl8xxxu */
 #endif
 
 #ifdef CONFIG_RTL8821C
