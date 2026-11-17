@@ -47,4 +47,6 @@ source "drivers/net/wireless/rockchip_wlan/rtl8188fu/Kconfig"
 
 source "drivers/net/wireless/rockchip_wlan/rtl8852cu/Kconfig"
 
+source "drivers/net/wireless/rockchip_wlan/rtl8852au/Kconfig"
+
 endif # WL_ROCKCHIP
