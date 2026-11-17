@@ -432,6 +432,8 @@ void asoc_simple_canonicalize_cpu(struct snd_soc_dai_link *dai_link,
 }
 EXPORT_SYMBOL_GPL(asoc_simple_canonicalize_cpu);
 
+static void asoc_simple_forget_hp_det(struct snd_soc_card *card);
+
 int asoc_simple_clean_reference(struct snd_soc_card *card)
 {
 	struct snd_soc_dai_link *dai_link;
@@ -441,6 +443,7 @@ int asoc_simple_clean_reference(struct snd_soc_card *card)
 		of_node_put(dai_link->cpus->of_node);
 		of_node_put(dai_link->codecs->of_node);
 	}
+	asoc_simple_forget_hp_det(card);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(asoc_simple_clean_reference);
@@ -562,6 +565,20 @@ static int hp_det_flip_set(const char *val, const struct kernel_param *kp)
 	}
 	mutex_unlock(&hp_det_lock);
 	return ret;
+}
+
+/*
+ * The jack GPIO lives in the card's devm memory. Drop the pointer when the card
+ * goes away or fails to register, or a later write to hp_det_flip queues freed
+ * memory as delayed work and spins in mod_delayed_work() with the module
+ * parameter lock held.
+ */
+static void asoc_simple_forget_hp_det(struct snd_soc_card *card)
+{
+	mutex_lock(&hp_det_lock);
+	if (hp_det_gpio && hp_det_gpio->jack && hp_det_gpio->jack->card == card)
+		hp_det_gpio = NULL;
+	mutex_unlock(&hp_det_lock);
 }
 
 static const struct kernel_param_ops hp_det_flip_ops = {
