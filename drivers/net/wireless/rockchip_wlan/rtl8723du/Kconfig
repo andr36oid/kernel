@@ -1,0 +1,5 @@
+config RTL8723DU
+	tristate "Realtek RTL8723DU USB Wi-Fi"
+	depends on USB && CFG80211 && m
+	help
+	  Build the vendor RTL8723DU driver as the 8723du module.
