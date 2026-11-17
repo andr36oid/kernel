@@ -1,0 +1,2 @@
+/* Separate U-Boot interrupt test; kernel description unchanged. */
+#include "rk3326-r36s-clone-soysauce-panel6.dts"
