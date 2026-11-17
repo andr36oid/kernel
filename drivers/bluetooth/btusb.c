@@ -9,6 +9,7 @@
 #include <linux/dmi.h>
 #include <linux/module.h>
 #include <linux/usb.h>
+#include <linux/pm_runtime.h>
 #include <linux/usb/quirks.h>
 #include <linux/firmware.h>
 #include <linux/iopoll.h>
@@ -1927,6 +1928,7 @@ static int btusb_setup_csr(struct hci_dev *hdev)
 	struct hci_rp_read_local_version *rp;
 	struct sk_buff *skb;
 	bool is_fake = false;
+	int ret;
 
 	BT_DBG("%s", hdev->name);
 
@@ -2020,6 +2022,28 @@ static int btusb_setup_csr(struct hci_dev *hdev)
 		 */
 		clear_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
 		clear_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
+
+		/* From Linux 5.16 (Barrot 8041a02 / FR3191 clones, bcdDevice
+		 * 0x0134 and 0x7558): their bulk RX endpoint reports no data
+		 * until the device was suspended once, and remote wakeup on
+		 * that endpoint is broken. Suspend once, then wake it up, and
+		 * clear can_wake. Harmless for the other clones.
+		 */
+		pm_runtime_allow(&data->udev->dev);
+
+		ret = pm_runtime_suspend(&data->udev->dev);
+		if (ret >= 0)
+			msleep(200);
+		else
+			bt_dev_warn(hdev, "CSR: Couldn't suspend the device for the Barrot 8041a02 receive-issue workaround");
+
+		pm_runtime_forbid(&data->udev->dev);
+
+		device_set_wakeup_capable(&data->udev->dev, false);
+
+		/* Re-enable autosuspend if this was requested */
+		if (enable_autosuspend)
+			usb_enable_autosuspend(data->udev);
 	}
 
 	kfree_skb(skb);
