@@ -983,6 +983,7 @@ static const struct usb_device_id rt2800usb_device_table[] = {
 	{ USB_DEVICE(0x15a9, 0x0006) },
 	/* Sweex */
 	{ USB_DEVICE(0x177f, 0x0153) },
+	{ USB_DEVICE(0x177f, 0x1163) },
 	{ USB_DEVICE(0x177f, 0x0164) },
 	{ USB_DEVICE(0x177f, 0x0302) },
 	{ USB_DEVICE(0x177f, 0x0313) },

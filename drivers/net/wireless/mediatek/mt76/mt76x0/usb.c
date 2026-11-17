@@ -15,6 +15,7 @@ static struct usb_device_id mt76x0_device_table[] = {
 	{ USB_DEVICE(0x148F, 0x7610) },	/* MT7610U */
 	{ USB_DEVICE(0x13B1, 0x003E) },	/* Linksys AE6000 */
 	{ USB_DEVICE(0x0E8D, 0x7610) },	/* Sabrent NTWLAC */
+	{ USB_DEVICE(0x2357, 0x010b) },	/* TP-LINK T2UHP_UN_v1 */
 	{ USB_DEVICE(0x7392, 0xa711) },	/* Edimax 7711mac */
 	{ USB_DEVICE(0x7392, 0xb711) },	/* Edimax / Elecom  */
 	{ USB_DEVICE(0x148f, 0x761a) },	/* TP-Link TL-WDN5200 */
