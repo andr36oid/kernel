@@ -100,7 +100,7 @@ static const struct uid_entry uid_base_stuff[] = {
 };
 
 static const struct inode_operations proc_uid_def_inode_operations = {
-	.setattr	= proc_setattr,
+	.setattr	= proc_nochmod_setattr,
 };
 
 static struct inode *proc_uid_make_inode(struct super_block *sb, kuid_t kuid)
@@ -189,7 +189,7 @@ static int proc_uid_base_readdir(struct file *file, struct dir_context *ctx)
 
 static const struct inode_operations proc_uid_base_inode_operations = {
 	.lookup		= proc_uid_base_lookup,
-	.setattr	= proc_setattr,
+	.setattr	= proc_nochmod_setattr,
 };
 
 static const struct file_operations proc_uid_base_operations = {
@@ -308,7 +308,7 @@ static const struct file_operations proc_uid_operations = {
 
 static const struct inode_operations proc_uid_inode_operations = {
 	.lookup		= proc_uid_lookup,
-	.setattr	= proc_setattr,
+	.setattr	= proc_nochmod_setattr,
 };
 
 int __init proc_uid_init(void)

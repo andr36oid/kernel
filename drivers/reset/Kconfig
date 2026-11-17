@@ -155,6 +155,14 @@ config RESET_RASPBERRYPI
 	  interfacing with RPi4's co-processor and model these firmware
 	  initialization routines as reset lines.
 
+config RESET_RZG2L_USBPHY_CTRL
+	tristate "Renesas RZ/G2L USBPHY control driver"
+	depends on ARCH_RZG2L || COMPILE_TEST
+	select MFD_SYSCON
+	help
+	  Support for USBPHY Control found on RZ/G2L family. It mainly
+	  controls reset and power down of the USB/PHY.
+
 config RESET_SCMI
 	tristate "Reset driver controlled via ARM SCMI interface"
 	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST

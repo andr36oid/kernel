@@ -368,18 +368,21 @@ int kbase_dma_fence_wait(struct kbase_jd_atom *katom,
 #else
 		struct dma_resv *obj = info->resv_objs[i];
 #endif
-		if (!test_bit(i, info->dma_fence_excl_bitmap)) {
+		if (!test_bit(i, info->dma_fence_excl_bitmap) ||
+		    LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
 			err = reservation_object_reserve_shared(obj);
 #else
-			err = dma_resv_reserve_shared(obj, 1);
+			err = dma_resv_reserve_fences(obj, 1);
 #endif
 			if (err) {
 				dev_err(katom->kctx->kbdev->dev,
 					"Error %d reserving space for shared fence.\n", err);
 				goto end;
 			}
+		}
 
+		if (!test_bit(i, info->dma_fence_excl_bitmap)) {
 			err = kbase_dma_fence_add_reservation_callback(katom, obj, false);
 			if (err) {
 				dev_err(katom->kctx->kbdev->dev,

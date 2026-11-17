@@ -102,6 +102,14 @@ int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 	const __be32 *tmp, *imap, *imask, dummy_imask[] = { [0 ... MAX_PHANDLE_ARGS] = cpu_to_be32(~0) };
 	u32 intsize = 1, addrsize, newintsize = 0, newaddrsize = 0;
 	int imaplen, match, i, rc = -EINVAL;
+	static const char * const renesas_socs[] = {
+		"renesas,r9a08g045", /* Renesas RZ/G3S */
+		NULL
+	};
+	bool renesas = false;
+
+	if (of_machine_compatible_match(renesas_socs))
+		renesas = true;
 
 #ifdef DEBUG
 	of_print_phandle_args("of_irq_parse_raw: ", out_irq);
@@ -160,12 +168,17 @@ int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 
 	/* Now start the actual "proper" walk of the interrupt tree */
 	while (ipar != NULL) {
-		/* Now check if cursor is an interrupt-controller and if it is
-		 * then we are done
+		/*
+		 * Now check if cursor is an interrupt-controller and
+		 * if it is then we are done, unless there is an
+		 * interrupt-map which takes precedence.
 		 */
+		imap = of_get_property(ipar, "interrupt-map", &imaplen);
 		if (of_property_read_bool(ipar, "interrupt-controller")) {
-			pr_debug(" -> got it !\n");
-			return 0;
+			if ((renesas && !imap) || !renesas) {
+				pr_debug(" -> got it !\n");
+				return 0;
+			}
 		}
 
 		/*
@@ -177,8 +190,6 @@ int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 			goto fail;
 		}
 
-		/* Now look for an interrupt-map */
-		imap = of_get_property(ipar, "interrupt-map", &imaplen);
 		/* No interrupt map, check for an interrupt parent */
 		if (imap == NULL) {
 			pr_debug(" -> no map, getting parent\n");
@@ -259,10 +270,20 @@ int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 		out_irq->args_count = intsize = newintsize;
 		addrsize = newaddrsize;
 
+		if (renesas) {
+			out_irq->np = newpar;
+			if (ipar == newpar) {
+				pr_debug("%pOF interrupt-map entry to self\n", ipar);
+				return 0;
+			}
+		}
+
 	skiplevel:
 		/* Iterate again with new parent */
-		out_irq->np = newpar;
-		pr_debug(" -> new parent: %pOF\n", newpar);
+		if (!renesas) {
+			out_irq->np = newpar;
+			pr_debug(" -> new parent: %pOF\n", newpar);
+		}
 		of_node_put(ipar);
 		ipar = newpar;
 		newpar = NULL;
@@ -521,9 +542,18 @@ void __init of_irq_init(const struct of_device_id *matches)
 
 		desc->irq_init_cb = match->data;
 		desc->dev = of_node_get(np);
-		desc->interrupt_parent = of_irq_find_parent(np);
-		if (desc->interrupt_parent == np)
+		/*
+		 * interrupts-extended can reference multiple parent domains.
+		 * Arbitrarily pick the first one; assume any other parents
+		 * are the same distance away from the root irq controller.
+		 */
+		desc->interrupt_parent = of_parse_phandle(np, "interrupts-extended", 0);
+		if (!desc->interrupt_parent)
+			desc->interrupt_parent = of_irq_find_parent(np);
+		if (desc->interrupt_parent == np) {
+			of_node_put(desc->interrupt_parent);
 			desc->interrupt_parent = NULL;
+		}
 		list_add_tail(&desc->list, &intc_desc_list);
 	}
 

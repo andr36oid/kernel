@@ -55,8 +55,8 @@
 #define	IMX219_EXPOSURE_STEP		1
 
 #define IMX219_REG_VTS			0x0160
-#define IMX219_VTS_MAX			0xffff
-#define IMX219_VBLANK_MIN		4
+#define IMX219_VTS_MAX			0xfffe
+#define IMX219_VBLANK_MIN		32
 
 /* Analog gain control */
 #define IMX219_REG_ANALOG_GAIN		0x0157
@@ -1524,10 +1524,11 @@ static int imx219_probe(struct i2c_client *client,
 		return -EINVAL;
 	}
 
-	imx219->reset_gpio = devm_gpiod_get(dev, "reset", imx219->is_thunderboot ?
+	imx219->reset_gpio = devm_gpiod_get_optional(dev, "reset", imx219->is_thunderboot ?
 					    GPIOD_ASIS : GPIOD_OUT_LOW);
 	if (IS_ERR(imx219->reset_gpio))
-		dev_warn(dev, "Failed to get reset-gpios\n");
+		return dev_err_probe(dev, PTR_ERR(imx219->reset_gpio),
+				     "Failed to get reset-gpios\n");
 
 	imx219->pinctrl = devm_pinctrl_get(dev);
 	if (!IS_ERR(imx219->pinctrl)) {

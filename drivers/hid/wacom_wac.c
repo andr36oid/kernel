@@ -1589,7 +1589,8 @@ static int wacom_intuos_pro2_bt_irq(struct wacom_wac *wacom, size_t len)
 		return 0;
 	}
 
-	if (wacom->features.type == INTUOSP2_BT) {
+	if (wacom->features.type == INTUOSP2_BT ||
+	    wacom->features.type == INTUOSP2S_BT) {
 		if (len < 286) {
 			dev_warn(wacom->pen_input->dev.parent,
 				 "Pro2 BT report too short: %zu bytes\n", len);

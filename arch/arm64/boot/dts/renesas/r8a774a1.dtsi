@@ -2279,6 +2279,7 @@
 			max-frequency = <200000000>;
 			power-domains = <&sysc R8A774A1_PD_ALWAYS_ON>;
 			resets = <&cpg 314>;
+			iommus = <&ipmmu_ds1 32>;
 			status = "disabled";
 		};
 
@@ -2291,6 +2292,7 @@
 			max-frequency = <200000000>;
 			power-domains = <&sysc R8A774A1_PD_ALWAYS_ON>;
 			resets = <&cpg 313>;
+			iommus = <&ipmmu_ds1 33>;
 			status = "disabled";
 		};
 
@@ -2303,6 +2305,7 @@
 			max-frequency = <200000000>;
 			power-domains = <&sysc R8A774A1_PD_ALWAYS_ON>;
 			resets = <&cpg 312>;
+			iommus = <&ipmmu_ds1 34>;
 			status = "disabled";
 		};
 
@@ -2315,6 +2318,24 @@
 			max-frequency = <200000000>;
 			power-domains = <&sysc R8A774A1_PD_ALWAYS_ON>;
 			resets = <&cpg 311>;
+			iommus = <&ipmmu_ds1 35>;
+			status = "disabled";
+		};
+
+		rpc: spi@ee200000 {
+			compatible = "renesas,r8a774a1-rpc-if",
+				     "renesas,rcar-gen3-rpc-if";
+			reg = <0 0xee200000 0 0x200>,
+			      <0 0x08000000 0 0x4000000>,
+			      <0 0xee208000 0 0x100>;
+			reg-names = "regs", "dirmap", "wbuf";
+			interrupts = <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cpg CPG_MOD 917>;
+			clock-names = "rpc";
+			power-domains = <&sysc R8A774A1_PD_ALWAYS_ON>;
+			resets = <&cpg 917>;
+			#address-cells = <1>;
+			#size-cells = <0>;
 			status = "disabled";
 		};
 
@@ -2443,6 +2464,7 @@
 			clocks = <&cpg CPG_MOD 615>;
 			power-domains = <&sysc R8A774A1_PD_A3VC>;
 			resets = <&cpg 615>;
+			iommus = <&ipmmu_vc0 16>;
 		};
 
 		fcpvb0: fcp@fe96f000 {
@@ -2451,6 +2473,7 @@
 			clocks = <&cpg CPG_MOD 607>;
 			power-domains = <&sysc R8A774A1_PD_A3VC>;
 			resets = <&cpg 607>;
+			iommus = <&ipmmu_vi0 5>;
 		};
 
 		fcpvd0: fcp@fea27000 {

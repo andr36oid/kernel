@@ -703,6 +703,10 @@ nfsd4_decode_create(struct nfsd4_compoundargs *argp, struct nfsd4_create *create
 	case NF4LNK:
 		READ_BUF(4);
 		create->cr_datalen = be32_to_cpup(p++);
+		if (!create->cr_datalen)
+			return nfserr_inval;
+		if (create->cr_datalen > NFS4_MAXPATHLEN)
+			return nfserr_nametoolong;
 		READ_BUF(create->cr_datalen);
 		create->cr_data = svcxdr_dupstr(argp, p, create->cr_datalen);
 		if (!create->cr_data)
@@ -1220,6 +1224,7 @@ nfsd4_decode_secinfo_no_name(struct nfsd4_compoundargs *argp,
 {
 	DECODE_HEAD;
 
+	sin->sin_exp = NULL;
 	READ_BUF(4);
 	sin->sin_style = be32_to_cpup(p++);
 	DECODE_TAIL;
@@ -1764,6 +1769,7 @@ static __be32 nfsd4_decode_nl4_server(struct nfsd4_compoundargs *argp,
 {
 	DECODE_HEAD;
 	struct nfs42_netaddr *naddr;
+	u32 str_len;
 
 	READ_BUF(4);
 	ns->nl4_type = be32_to_cpup(p++);
@@ -1788,6 +1794,17 @@ static __be32 nfsd4_decode_nl4_server(struct nfsd4_compoundargs *argp,
 		READ_BUF(naddr->addr_len);
 		COPYMEM(naddr->addr, naddr->addr_len);
 		break;
+	case NL4_NAME:
+	case NL4_URL:
+		/*
+		 * Well-formed XDR, but only NL4_NETADDR is supported. Consume
+		 * the utf8str_cis to keep the stream aligned, then return
+		 * NFS4ERR_NOTSUPP rather than the misleading NFS4ERR_BADXDR.
+		 */
+		READ_BUF(4);
+		str_len = be32_to_cpup(p++);
+		READ_BUF(str_len);
+		return nfserr_notsupp;
 	default:
 		goto xdr_error;
 	}
@@ -5244,9 +5261,14 @@ nfsd4_encode_operation(struct nfsd4_compoundres *resp, struct nfsd4_op *op)
 		int len = xdr->buf->len - post_err_offset;
 
 		so->so_replay.rp_status = op->status;
-		so->so_replay.rp_buflen = len;
-		read_bytes_from_xdr_buf(xdr->buf, post_err_offset,
+		if (len <= NFSD4_REPLAY_ISIZE) {
+			so->so_replay.rp_buflen = len;
+			read_bytes_from_xdr_buf(xdr->buf,
+						post_err_offset,
 						so->so_replay.rp_buf, len);
+		} else {
+			so->so_replay.rp_buflen = 0;
+		}
 	}
 status:
 	/* Note that op->status is already in network byte order: */

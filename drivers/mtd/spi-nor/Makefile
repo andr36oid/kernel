@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 
-spi-nor-objs			:= core.o sfdp.o
+spi-nor-objs			:= core.o sfdp.o swp.o
 spi-nor-$(CONFIG_MTD_SPI_NOR_ATMEL)		+= atmel.o
 spi-nor-$(CONFIG_MTD_SPI_NOR_BOYA)		+= boya.o
 spi-nor-$(CONFIG_MTD_SPI_NOR_CATALYST)		+= catalyst.o

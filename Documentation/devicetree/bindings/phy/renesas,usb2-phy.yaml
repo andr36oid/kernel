@@ -13,7 +13,9 @@ properties:
   compatible:
     oneOf:
       - items:
-          - const: renesas,usb2-phy-r8a77470 # RZ/G1C
+          - enum:
+              - renesas,usb2-phy-r8a77470  # RZ/G1C
+              - renesas,usb2-phy-r9a08g045 # RZ/G3S
 
       - items:
           - enum:
@@ -29,6 +31,13 @@ properties:
               - renesas,usb2-phy-r8a77990 # R-Car E3
               - renesas,usb2-phy-r8a77995 # R-Car D3
           - const: renesas,rcar-gen3-usb2-phy
+
+      - items:
+          - enum:
+              - renesas,usb2-phy-r9a07g043 # RZ/G2UL
+              - renesas,usb2-phy-r9a07g044 # RZ/G2{L,LC}
+              - renesas,usb2-phy-r9a07g054 # RZ/V2L
+          - const: renesas,rzg2l-usb2-phy
 
   reg:
     maxItems: 1
@@ -93,6 +102,18 @@ required:
   - reg
   - clocks
   - '#phy-cells'
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - renesas,usb2-phy-r9a08g045
+              - renesas,rzg2l-usb2-phy
+    then:
+      required:
+        - resets
 
 additionalProperties: false
 

@@ -646,8 +646,7 @@ struct dev_pm_info {
 	struct pm_subsys_data	*subsys_data;  /* Owned by the subsystem. */
 	void (*set_latency_tolerance)(struct device *, s32);
 	struct dev_pm_qos	*qos;
-
-	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_USE(1, bool detach_power_off);
 	ANDROID_KABI_RESERVE(2);
 };
 

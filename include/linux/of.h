@@ -13,6 +13,7 @@
  */
 #include <linux/types.h>
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
 #include <linux/errno.h>
 #include <linux/kobject.h>
 #include <linux/mod_devicetable.h>
@@ -128,6 +129,7 @@ static inline struct device_node *of_node_get(struct device_node *node)
 }
 static inline void of_node_put(struct device_node *node) { }
 #endif /* !CONFIG_OF_DYNAMIC */
+DEFINE_FREE(device_node, struct device_node *, if (_T) of_node_put(_T))
 
 /* Pointer for first entry in chain of all nodes. */
 extern struct device_node *of_root;
@@ -397,7 +399,20 @@ extern int of_alias_get_alias_list(const struct of_device_id *matches,
 				   const char *stem, unsigned long *bitmap,
 				   unsigned int nbits);
 
-extern int of_machine_is_compatible(const char *compat);
+bool of_machine_compatible_match(const char *const *compats);
+
+/**
+ * of_machine_is_compatible - Test root of device tree for a given compatible value
+ * @compat: compatible string to look for in root node's compatible property.
+ *
+ * Return: true if the root node has the given value in its compatible property.
+ */
+static inline bool of_machine_is_compatible(const char *compat)
+{
+	const char *compats[] = { compat, NULL };
+
+	return of_machine_compatible_match(compats);
+}
 
 extern int of_add_property(struct device_node *np, struct property *prop);
 extern int of_remove_property(struct device_node *np, struct property *prop);
@@ -797,6 +812,11 @@ static inline int of_add_property(struct device_node *np, struct property *prop)
 static inline int of_remove_property(struct device_node *np, struct property *prop)
 {
 	return 0;
+}
+
+static inline bool of_machine_compatible_match(const char *const *compats)
+{
+	return false;
 }
 
 static inline bool of_console_check(const struct device_node *dn, const char *name, int index)

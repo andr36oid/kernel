@@ -32,4 +32,11 @@ struct xhci_plat_priv_overwrite {
 
 int xhci_plat_register_vendor_ops(struct xhci_vendor_ops *vendor_ops);
 
+
+int xhci_plat_probe(struct platform_device *pdev, struct device *sysdev,
+		    const struct xhci_plat_priv *priv_match);
+
+int xhci_plat_remove(struct platform_device *dev);
+extern const struct dev_pm_ops xhci_plat_pm_ops;
+
 #endif	/* _XHCI_PLAT_H */
