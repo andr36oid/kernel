@@ -2255,7 +2255,7 @@ static void dw_mci_tasklet_func(unsigned long priv)
 
 						if (readl_poll_timeout_atomic(host->regs + SDMMC_STATUS, fifo_count,
 								((fifo_count >> 17) & 0x7FF) <= RV1106_RAMDON_DATA_SIZE / 4,
-								0, 5000 * USEC_PER_MSEC))
+								10, 5000 * USEC_PER_MSEC))
 							data->error = -ETIMEDOUT;
 						udelay(1);
 						dw_mci_reset(host);

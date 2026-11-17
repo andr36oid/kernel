@@ -481,7 +481,7 @@ static int rockchip_pmu_set_idle_request(struct rockchip_pm_domain *pd,
 	target_ack = idle ? pd_info->ack_mask : 0;
 	ret = readx_poll_timeout_atomic(rockchip_pmu_read_ack, pmu, val,
 					(val & pd_info->ack_mask) == target_ack,
-					0, 10000);
+					1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to get ack on domain '%s', target_idle = %d, target_ack = %d, val=0x%x\n",
@@ -490,7 +490,7 @@ static int rockchip_pmu_set_idle_request(struct rockchip_pm_domain *pd,
 	}
 
 	ret = readx_poll_timeout_atomic(rockchip_pmu_domain_is_idle, pd,
-					is_idle, is_idle == idle, 0, 10000);
+					is_idle, is_idle == idle, 1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to set idle on domain '%s',  target_idle = %d, val=%d\n",
@@ -735,7 +735,7 @@ static int rockchip_pmu_domain_mem_reset(struct rockchip_pm_domain *pd)
 	int ret = 0;
 
 	ret = readx_poll_timeout_atomic(rockchip_pmu_domain_is_chain_on, pd, is_on,
-					is_on == true, 0, 10000);
+					is_on == true, 1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to get chain status '%s', target_on=1, val=%d\n",
@@ -750,7 +750,7 @@ static int rockchip_pmu_domain_mem_reset(struct rockchip_pm_domain *pd)
 	dsb(sy);
 
 	ret = readx_poll_timeout_atomic(rockchip_pmu_domain_is_mem_on, pd, is_on,
-					is_on == false, 0, 10000);
+					is_on == false, 1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to get mem status '%s', target_on=0, val=%d\n",
@@ -763,7 +763,7 @@ static int rockchip_pmu_domain_mem_reset(struct rockchip_pm_domain *pd)
 	dsb(sy);
 
 	ret = readx_poll_timeout_atomic(rockchip_pmu_domain_is_mem_on, pd, is_on,
-					is_on == true, 0, 10000);
+					is_on == true, 1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to get mem status '%s', target_on=1, val=%d\n",
@@ -832,7 +832,7 @@ static int rockchip_do_pmu_set_power_domain(struct rockchip_pm_domain *pd,
 	}
 
 	ret = readx_poll_timeout_atomic(rockchip_pmu_domain_is_on, pd, is_on,
-					is_on == on, 0, 10000);
+					is_on == on, 1, 10000);
 	if (ret) {
 		dev_err(pmu->dev,
 			"failed to set domain '%s', target_on= %d, val=%d\n",
