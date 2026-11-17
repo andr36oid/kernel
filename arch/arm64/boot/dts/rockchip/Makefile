@@ -375,3 +375,5 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r46h-v22-android.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50h-android.dtb
 
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50s-v30-android.dtb
+
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50s-v30-b-android.dtb
