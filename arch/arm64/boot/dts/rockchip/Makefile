@@ -355,3 +355,5 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r46h-android.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50s-android.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-g350-android.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-grc802.dtb
+
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-k36-panel3.dtb
