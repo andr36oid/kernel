@@ -2091,13 +2091,17 @@ static int rk817_bat_parse_dt(struct rk817_battery_device *battery)
 	if (battery->chip_id == RK809_ID) {
 		ret = of_property_read_u32(np, "bat_res_up",
 					   &pdata->bat_res_up);
-		if (ret < 0)
-			dev_err(dev, "battery res_up missing\n");
+		if (ret < 0 || !pdata->bat_res_up) {
+			dev_err(dev, "RK809 requires a nonzero bat_res_up\n");
+			return -EINVAL;
+		}
 
 		ret = of_property_read_u32(np, "bat_res_down",
 					   &pdata->bat_res_down);
-		if (ret < 0)
-			dev_err(dev, "battery res_down missing!\n");
+		if (ret < 0 || !pdata->bat_res_down) {
+			dev_err(dev, "RK809 requires a nonzero bat_res_down\n");
+			return -EINVAL;
+		}
 
 		ret = of_property_read_u32(np, "design_max_voltage",
 					   &pdata->design_max_voltage);
