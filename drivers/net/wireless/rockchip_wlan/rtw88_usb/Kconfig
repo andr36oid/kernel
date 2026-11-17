@@ -1,0 +1,7 @@
+config ANDR36OID_RTW88_USB
+	tristate "Realtek RTL8822CU USB backport"
+	depends on USB && MAC80211 && m
+	select WANT_DEV_COREDUMP
+	help
+	  Build the isolated USB backport for RTL8822CU. Exported symbols
+	  carry an a36_rtw88usb_ prefix so native rtw88 may coexist.

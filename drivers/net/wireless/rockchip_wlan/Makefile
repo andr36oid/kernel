@@ -13,3 +13,5 @@ obj-$(CONFIG_RTL8852CU) += rtl8852cu/
 obj-$(CONFIG_RTL8852AU) += rtl8852au/
 
 obj-$(CONFIG_RTL8723DU) += rtl8723du/
+
+obj-$(CONFIG_ANDR36OID_RTW88_USB) += rtw88_usb/
