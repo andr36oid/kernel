@@ -2092,10 +2092,18 @@ static int snd_soc_bind_card(struct snd_soc_card *card)
 		}
 	}
 
+	/*
+	 * Routes from the device tree that name a widget the codec does not
+	 * have are logged and skipped, as on 4.19. The RK817 codec driver has
+	 * no DAPM widgets, and every simple-audio-card device tree of these
+	 * consoles routes to MIC_IN/HPOL/HPOR: failing here leaves the console
+	 * with no sound card at all.
+	 */
 	ret = snd_soc_dapm_add_routes(&card->dapm, card->of_dapm_routes,
 				      card->num_of_dapm_routes);
 	if (ret < 0)
-		goto probe_end;
+		dev_warn(card->dev,
+			 "ASoC: ignoring %d from the device tree routes\n", ret);
 
 	/* try to set some sane longname if DMI is available */
 	snd_soc_set_dmi_name(card, NULL);
