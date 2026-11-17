@@ -369,3 +369,5 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-r36max-type2.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-r36max2.dtb
 
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r40s-android.dtb
+
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r46h-v22-android.dtb
