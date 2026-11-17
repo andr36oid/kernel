@@ -1135,7 +1135,7 @@ static void vop_disable_all_planes(struct vop *vop)
 	vop_cfg_done(vop);
 	ret = readx_poll_timeout_atomic(vop_is_allwin_disabled,
 					vop, active, active,
-					0, 500 * 1000);
+					10, 500 * 1000);
 	if (ret)
 		dev_err(vop->dev, "wait win close timeout\n");
 }
@@ -4376,7 +4376,7 @@ static void vop_wait_for_irq_handler(struct vop *vop)
 	 * shouldn't exceed microseconds range.
 	 */
 	ret = readx_poll_timeout_atomic(vop_fs_irq_is_pending, vop, pending,
-					!pending, 0, 10 * 1000);
+					!pending, 1, 10 * 1000);
 	if (ret)
 		DRM_DEV_ERROR(vop->dev, "VOP vblank IRQ stuck for 10 ms\n");
 
