@@ -77,5 +77,4 @@
 
 /* Enabled only while the packed loader and kernel panel contracts match. */
 &{/dsi@ff450000/panel@0} {
-	andr36oid,adopt-loader-panel;
 };

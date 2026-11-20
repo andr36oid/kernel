@@ -456,6 +456,16 @@
 	amux-a-gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_LOW>;
 	amux-b-gpios = <&gpio2 RK_PB7 GPIO_ACTIVE_LOW>;
 	amux-en-gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_LOW>;
+
+	/* Stock /gamepad RGB pins. The stock keros node supplies no pulse
+	 * control pin, so do not guess the Ultra's GPIO0_B3 on this board.
+	 * This fallback is untested: no carrier runs until a user selects light. */
+	led-red-gpios = <&gpio2 RK_PA2 GPIO_ACTIVE_HIGH>;
+	led-green-gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_HIGH>;
+	led-blue-gpios = <&gpio2 RK_PA0 GPIO_ACTIVE_HIGH>;
+	andr36oid,led-default-mode = "off";
+	andr36oid,led-default-color = <0x000000>;
+
 	invert-absx;
 	invert-absy;
 	/delete-property/ invert-absrx;

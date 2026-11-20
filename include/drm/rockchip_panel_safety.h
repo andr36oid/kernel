@@ -6,7 +6,7 @@
 #include <linux/compiler.h>
 
 /* No device I/O here: callers supply checked operations. This same protocol is
- * exercised by the VM fault fixture, including the boot-lifetime error latch.
+ * exercised by the VM fault fixture, including the error latch and clean off-to-on retry.
  */
 enum rockchip_panel_safe_step {
 	RK_PANEL_SAFE_NONE,
@@ -28,6 +28,7 @@ struct rockchip_panel_safe_ops {
 	int (*clock)(void *data);
 	int (*prepare)(void *data);
 	void (*abort)(void *data, int error);
+	int (*retry)(void *data);
 };
 
 static inline int
@@ -59,9 +60,16 @@ rockchip_panel_safe_run(struct rockchip_panel_safe_state *s,
 {
 	int blank, stop, ret;
 
-	/* Never automatically retry even a full modeset after a failed attempt. */
-	if (READ_ONCE(s->error))
-		return READ_ONCE(s->error);
+	/* A later full screen-on can retry panel init only after the caller
+	 * proves VOP acknowledged stop and both panel and DSI are powered off.
+	 * Stop/clock/backlight failures must never be cleared by this path. */
+	if (READ_ONCE(s->error)) {
+		if (s->step != RK_PANEL_SAFE_PREPARE || !ops->retry || ops->retry(data))
+			return READ_ONCE(s->error);
+		WRITE_ONCE(s->error, 0);
+		s->step = RK_PANEL_SAFE_NONE;
+		s->reported = false;
+	}
 	blank = ops->blank(data);
 	/* A failed backlight operation must not prevent trying to stop scanout. */
 	stop = ops->stop(data);

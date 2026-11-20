@@ -754,6 +754,7 @@ extern struct platform_driver vconn_platform_driver;
 extern struct platform_driver vvop_platform_driver;
 bool rockchip_drm_has_guarded_panel(struct drm_crtc *crtc);
 void rockchip_drm_abort_panel(struct drm_crtc *crtc, int error);
+int rockchip_drm_retry_panel(struct drm_crtc *crtc);
 int rockchip_drm_prepare_panel(struct drm_crtc *crtc,
 			      struct drm_atomic_state *state, bool blank_only);
 #endif /* _ROCKCHIP_DRM_DRV_H_ */

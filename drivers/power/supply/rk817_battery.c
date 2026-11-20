@@ -860,7 +860,8 @@ static void rk817_bat_init_voltage_kb(struct rk817_battery_device *battery)
 
 	vcalib0 = rk817_bat_get_vaclib0(battery);
 	vcalib1 =  rk817_bat_get_vaclib1(battery);
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		battery->voltage_k = (1050 - 600) * 1000 / DIV(vcalib1 - vcalib0);
 		battery->voltage_b = 1050 - (battery->voltage_k * vcalib1) / 1000;
 	} else {
@@ -973,7 +974,8 @@ static int rk817_bat_get_ocv_voltage(struct rk817_battery_device *battery)
 	val |= rk817_bat_field_read(battery, OCV_VOL_L);
 	vol = battery->voltage_k * val / 1000 + battery->voltage_b;
 
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -989,7 +991,8 @@ static int rk817_bat_get_ocv0_voltage0(struct rk817_battery_device *battery)
 	val = rk817_bat_field_read(battery, OCV_VOL0_H) << 8;
 	val |= rk817_bat_field_read(battery, OCV_VOL0_L);
 	vol = battery->voltage_k * val / 1000 + battery->voltage_b;
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -1006,7 +1009,8 @@ static int rk817_bat_get_pwron_voltage(struct rk817_battery_device *battery)
 	val = rk817_bat_field_read(battery, PWRON_VOL_H) << 8;
 	val |= rk817_bat_field_read(battery, PWRON_VOL_L);
 	vol = battery->voltage_k * val / 1000 + battery->voltage_b;
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -1029,7 +1033,8 @@ static int rk817_bat_get_battery_voltage(struct rk817_battery_device *battery)
 
 	vol = battery->voltage_k * val / 1000 + battery->voltage_b;
 
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -1049,7 +1054,8 @@ static int rk817_bat_get_USB_voltage(struct rk817_battery_device *battery)
 
 	vol = (battery->voltage_k * val / 1000 + battery->voltage_b) * 60 / 46;
 
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -1067,7 +1073,8 @@ static int rk817_bat_get_sys_voltage(struct rk817_battery_device *battery)
 
 	vol = (battery->voltage_k * val / 1000 + battery->voltage_b) * 60 / 46;
 
-	if (battery->chip_id == RK809_ID) {
+	if (battery->chip_id == RK809_ID &&
+	    battery->pdata->bat_res_up && battery->pdata->bat_res_down) {
 		vol_temp = vol * battery->pdata->bat_res_up /
 			   battery->pdata->bat_res_down + vol;
 		vol = vol_temp;
@@ -2089,24 +2096,25 @@ static int rk817_bat_parse_dt(struct rk817_battery_device *battery)
 		dev_err(dev, "power_off_thresd missing!\n");
 
 	if (battery->chip_id == RK809_ID) {
-		ret = of_property_read_u32(np, "bat_res_up",
-					   &pdata->bat_res_up);
-		if (ret < 0 || !pdata->bat_res_up) {
-			dev_err(dev, "RK809 requires a nonzero bat_res_up\n");
-			return -EINVAL;
-		}
-
-		ret = of_property_read_u32(np, "bat_res_down",
-					   &pdata->bat_res_down);
-		if (ret < 0 || !pdata->bat_res_down) {
-			dev_err(dev, "RK809 requires a nonzero bat_res_down\n");
-			return -EINVAL;
-		}
+		of_property_read_u32(np, "bat_res_up", &pdata->bat_res_up);
+		of_property_read_u32(np, "bat_res_down", &pdata->bat_res_down);
+		if (!pdata->bat_res_up || !pdata->bat_res_down)
+			dev_warn(dev, "RK809 battery divider missing; using RK817 voltage calibration, verify battery readings\n");
 
 		ret = of_property_read_u32(np, "design_max_voltage",
 					   &pdata->design_max_voltage);
-		if (ret < 0)
-			dev_err(dev, "battery design_max_voltage missing!\n");
+		if (ret < 0 || !pdata->design_max_voltage) {
+			struct device_node *charger;
+
+			charger = of_get_child_by_name(np->parent, "charger");
+			of_property_read_u32(charger, "max_chrg_voltage",
+					     &pdata->design_max_voltage);
+			of_node_put(charger);
+			if (!pdata->design_max_voltage)
+				pdata->design_max_voltage = 4200;
+			dev_warn_once(dev, "RK809 battery full-voltage fallback %u mV in use; verify battery readings\n",
+				      pdata->design_max_voltage);
+		}
 
 		ret = of_property_read_u32(np, "register_chg_psy",
 					   &battery->is_register_chg_psy);

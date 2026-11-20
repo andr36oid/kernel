@@ -83,11 +83,13 @@ struct drm_connector *dw_mipi_dsi_get_connector(struct dw_mipi_dsi *dsi);
 bool dw_mipi_dsi_needs_checked_prepare(struct drm_bridge *bridge);
 int dw_mipi_dsi_output_is_off(struct drm_bridge *bridge);
 int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge, const struct drm_display_mode *mode);
+int dw_mipi_dsi_retry_after_failure(struct drm_bridge *bridge);
 int dw_mipi_dsi_blank_before_prepare(struct drm_bridge *bridge);
 void dw_mipi_dsi_abort_before_crtc(struct drm_bridge *bridge, int error);
 int dw_mipi_dsi_prepare_before_crtc(struct drm_bridge *bridge,
 				 struct drm_atomic_state *state);
 #else
+static inline int dw_mipi_dsi_retry_after_failure(struct drm_bridge *b) {return -1;}
 static inline int dw_mipi_dsi_adopt_loader(struct drm_bridge *b,const struct drm_display_mode *m)
 {return -1;}
 static inline int dw_mipi_dsi_output_is_off(struct drm_bridge *b){return 0;}

@@ -9,10 +9,12 @@
 #include <drm/drm_panel.h>
 
 #if IS_REACHABLE(CONFIG_DRM_PANEL_SIMPLE)
+bool panel_simple_retry_ready(struct drm_panel *panel);
 int panel_simple_loader_protect(struct drm_panel *panel);
 int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *step);
 int panel_simple_loader_unprotect(struct drm_panel *panel);
 #else
+static inline bool panel_simple_retry_ready(struct drm_panel *panel) { return false; }
 static inline int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *step)
 {
 	return error ? error : -EOPNOTSUPP;

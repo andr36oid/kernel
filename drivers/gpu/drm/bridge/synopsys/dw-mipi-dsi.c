@@ -1443,6 +1443,32 @@ int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge,const struct drm_display_
 }
 EXPORT_SYMBOL_GPL(dw_mipi_dsi_adopt_loader);
 
+int dw_mipi_dsi_retry_after_failure(struct drm_bridge *bridge)
+{
+	struct dw_mipi_dsi *dsi;
+
+	if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+		return -EOPNOTSUPP;
+	dsi = bridge_to_dsi(bridge);
+	/* Only a failed panel prepare/enable is retryable. Stop/clock/PHY
+	 * failures retain their guard until a clean state can be established. */
+	if (!dsi->checked_latched_error || !dsi->failed_step ||
+	    (strcmp(dsi->failed_step, "panel-prepare") &&
+	     strcmp(dsi->failed_step, "panel-enable")) ||
+	    !dsi->fault_cleaned || dsi->core_active ||
+	    !panel_simple_retry_ready(dsi->panel) ||
+	    dw_mipi_dsi_output_is_off(bridge) != 1)
+		return -EIO;
+	dsi->checked_latched_error = 0;
+	dsi->checked_error = 0;
+	dsi->checked_attempted = false;
+	dsi->fault_cleaned = false;
+	dsi->failed_step = NULL;
+	DRM_DEV_INFO(dsi->dev, "PANEL-SAFE: clean powered-off panel/DSI; new screen-on retries full init\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dw_mipi_dsi_retry_after_failure);
+
 int dw_mipi_dsi_blank_before_prepare(struct drm_bridge *bridge)
 {
 	struct dw_mipi_dsi *dsi;
@@ -1521,8 +1547,10 @@ int dw_mipi_dsi_prepare_before_crtc(struct drm_bridge *bridge,
 failed:
 	if (ret)
 		dw_mipi_dsi_abort_before_crtc(bridge, ret);
-	else
+	else {
+		dsi->failed_step = NULL;
 		DRM_DEV_INFO(dsi->dev, "PANEL-SAFE: real init complete before CRTC enable\n");
+	}
 	dsi->checked_error = ret;
 	return ret;
 }

@@ -148,6 +148,7 @@ struct panel_simple {
 	bool preserve_mode_once;
 	bool supply_prepared;
 	bool safety_cleanup_attempted;
+	bool safety_cleanup_failed;
 	int init_error;
 	bool power_invert;
 	bool no_hpd;
@@ -586,8 +587,6 @@ static int panel_simple_unprepare(struct drm_panel *panel)
 	const char *step = "exit-sequence";
 	int error = 0, ret;
 
-	if (p->init_error)
-		return p->init_error;
 	if (!p->prepared)
 		return 0;
 	if (p->desc->exit_seq) {
@@ -597,6 +596,10 @@ static int panel_simple_unprepare(struct drm_panel *panel)
 			error = panel_simple_xfer_dsi_cmd_seq(p, p->desc->exit_seq);
 		else
 			error = -EOPNOTSUPP;
+	}
+	if (error) {
+		dev_warn(panel->dev, "PANEL-SAFE: exit sequence failed %d; powering down without latching it\n", error);
+		error = 0;
 	}
 	ret = gpiod_direction_output(p->reset_gpio, 1);
 	if (ret && !error) {
@@ -621,7 +624,8 @@ static int panel_simple_unprepare(struct drm_panel *panel)
 	if (error) {
 		p->init_error = error;
 		p->safety_cleanup_attempted = true;
-		dev_err(panel->dev, "PANEL-SAFE: step=%s errno=%d latched after shutdown\n", step, error);
+		p->safety_cleanup_failed = true;
+		dev_warn(panel->dev, "PANEL-SAFE: step=%s errno=%d during power-down; cleanup required before retry\n", step, error);
 	}
 	return error;
 }
@@ -651,7 +655,7 @@ static int panel_simple_get_hpd_gpio(struct device *dev,
 	return 0;
 }
 
-static int panel_simple_prepare(struct drm_panel *panel)
+static int panel_simple_prepare_once(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
 	unsigned int delay;
@@ -661,8 +665,6 @@ static int panel_simple_prepare(struct drm_panel *panel)
 
 	dev_dbg(panel->dev, "prepare prepared=%u enabled=%u loader=%u\n",
 		 p->prepared, p->enabled, p->loader_protected);
-	if (p->init_error)
-		return p->init_error;
 	if (p->prepared)
 		return 0;
 
@@ -752,6 +754,37 @@ power_off:
 	return panel_simple_safety_abort(panel, err, step);
 }
 
+static int panel_simple_prepare(struct drm_panel *panel)
+{
+	struct panel_simple *p = to_panel_simple(panel);
+	int attempt, err;
+
+	if (p->prepared)
+		return 0;
+	/* A later screen-on/resume may retry a failed init. If powering down
+	 * failed, retry that cleanup first and never light an unknown state. */
+	if (p->safety_cleanup_failed) {
+		p->safety_cleanup_attempted = false;
+		err = panel_simple_safety_abort(panel, p->init_error, "retry-cleanup");
+		if (p->safety_cleanup_failed)
+			return err;
+	}
+	for (attempt = 0; attempt < 2; attempt++) {
+		p->init_error = 0;
+		p->safety_cleanup_attempted = false;
+		err = panel_simple_prepare_once(panel);
+		if (!err)
+			return 0;
+		dev_warn(panel->dev, "PANEL-SAFE: init attempt %d failed %d; %s\n",
+			 attempt + 1, err, attempt ? "screen-on may retry" : "retrying full reset/init");
+		if (p->safety_cleanup_failed)
+			return err;
+		if (!attempt && p->desc->delay.unprepare)
+			panel_simple_msleep(p->desc->delay.unprepare);
+	}
+	return err;
+}
+
 static int panel_simple_enable(struct drm_panel *panel)
 {
 	struct panel_simple *p = to_panel_simple(panel);
@@ -782,30 +815,51 @@ int panel_simple_safety_abort(struct drm_panel *panel, int error, const char *st
 	p = to_panel_simple(panel);
 	if (!p->init_error) {
 		p->init_error = error ? error : -EIO;
-		dev_err(panel->dev, "PANEL-SAFE: step=%s errno=%d latched; reset/off requested\n",
+		dev_err(panel->dev, "PANEL-SAFE: step=%s errno=%d; reset/off requested\n",
 			step, p->init_error);
 	}
 	if (p->safety_cleanup_attempted)
 		return p->init_error;
 	p->safety_cleanup_attempted = true;
+	p->safety_cleanup_failed = false;
 	ret = backlight_disable(panel->backlight);
-	if (ret)
+	if (ret) {
+		p->safety_cleanup_failed = true;
 		dev_err(panel->dev, "PANEL-SAFE: cleanup backlight-off failed %d; output must stay stopped\n", ret);
+	}
 	ret = gpiod_direction_output(p->reset_gpio, 1);
-	if (ret)
+	if (ret) {
+		p->safety_cleanup_failed = true;
 		dev_err(panel->dev, "PANEL-SAFE: cleanup reset request failed %d; output must stay stopped\n", ret);
+	}
 	ret = gpiod_direction_output(p->enable_gpio, 0);
-	if (ret)
+	if (ret) {
+		p->safety_cleanup_failed = true;
 		dev_err(panel->dev, "PANEL-SAFE: cleanup enable-off failed %d; output must stay stopped\n", ret);
+	}
 	ret = panel_simple_regulator_disable(p);
-	if (ret)
+	if (ret) {
+		p->safety_cleanup_failed = true;
 		dev_err(panel->dev, "PANEL-SAFE: cleanup supply-off failed %d; output must stay stopped\n", ret);
+	}
 	p->prepared = false;
 	p->enabled = false;
 	p->loader_protected = false;
 	return p->init_error;
 }
 EXPORT_SYMBOL_GPL(panel_simple_safety_abort);
+
+bool panel_simple_retry_ready(struct drm_panel *panel)
+{
+	struct panel_simple *p;
+
+	if (!panel || panel->funcs != &panel_simple_funcs)
+		return false;
+	p = to_panel_simple(panel);
+	return p->safety_cleanup_attempted && !p->safety_cleanup_failed &&
+		!p->prepared && !p->enabled && !p->supply_prepared;
+}
+EXPORT_SYMBOL_GPL(panel_simple_retry_ready);
 
 static int panel_simple_get_modes(struct drm_panel *panel,
 				  struct drm_connector *connector)

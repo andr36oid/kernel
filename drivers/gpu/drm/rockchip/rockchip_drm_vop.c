@@ -3602,7 +3602,20 @@ static void vop_panel_abort_op(void *data, int error)
 	rockchip_drm_abort_panel(d->crtc, error);
 }
 
+static int vop_panel_retry_op(void *data)
+{
+	struct vop_panel_prepare_data *d = data;
+	struct vop *vop = to_vop(d->crtc);
+
+	/* Only a previously acknowledged stop is enough. Do not turn a
+	 * timeout into permission to reset a panel that may still be scanned. */
+	if (!vop->panel_stopped || vop->panel_stop_failed)
+		return -EIO;
+	return rockchip_drm_retry_panel(d->crtc);
+}
+
 static const struct rockchip_panel_safe_ops vop_panel_safe_ops = {
+	.retry = vop_panel_retry_op,
 	.blank = vop_panel_blank_op,
 	.stop = vop_panel_stop_op,
 	.clock = vop_panel_clock_op,

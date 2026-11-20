@@ -49,6 +49,11 @@ KBUILD_CFLAGS	+= -mgeneral-regs-only	\
 KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
 KBUILD_AFLAGS	+= $(compat_vdso)
 
+# PX30/RK3326 boards use Cortex-A35 cores. Keep the current compiler.
+ifeq ($(CONFIG_CPU_PX30),y)
+KBUILD_CFLAGS += $(call cc-option,-mcpu=cortex-a35)
+endif
+
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 

@@ -1628,8 +1628,15 @@ static void rk817_charge_pre_init(struct rk817_charger *charge)
 
 	rk817_charge_set_chrg_finish_condition(charge);
 
-	if (rk817_charge_get_otg_state(charge))
-		rk817_charge_otg_disable(charge);
+	/* A switch left on by the loader is not an enable reference owned by
+	 * this consumer. Take one before dropping that inherited state; another
+	 * consumer's existing reference must continue to keep the rail on. */
+	if (rk817_charge_get_otg_state(charge) > 0) {
+		if (!regulator_enable(charge->otg5v_rdev))
+			rk817_charge_otg_disable(charge);
+		else
+			dev_warn(charge->dev, "cannot acquire inherited OTG regulator\n");
+	}
 	rk817_charge_field_write(charge, OTG_EN, OTG_DISABLE);
 	rk817_charge_set_otg_in(charge, OFFLINE);
 	rk817_charge_sys_can_sd_disable(charge);

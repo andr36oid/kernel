@@ -49,6 +49,25 @@ bool rockchip_drm_guarded_output_off(struct drm_crtc *crtc)
  return found;
 }
 
+int rockchip_drm_retry_panel(struct drm_crtc *crtc)
+{
+	struct drm_encoder *encoder;
+	bool found = false;
+	int ret;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask) {
+		struct drm_bridge *bridge = drm_bridge_chain_get_first_bridge(encoder);
+
+		if (!dw_mipi_dsi_needs_checked_prepare(bridge))
+			continue;
+		found = true;
+		ret = dw_mipi_dsi_retry_after_failure(bridge);
+		if (ret)
+			return ret;
+	}
+	return found ? 0 : -EOPNOTSUPP;
+}
+
 int rockchip_drm_prepare_panel(struct drm_crtc *crtc,
 			      struct drm_atomic_state *state, bool blank_only)
 {
@@ -97,7 +116,9 @@ static int rockchip_drm_checked_atomic_check(struct drm_device *dev,
 					    drm_bridge_chain_get_first_bridge(encoder)))
 					return -EOPNOTSUPP;
 		}
-		if (error && new_state->active)
+		/* An off -> on transition may retry through the guarded enable
+		 * path. No active-to-active update can bypass the failed frame. */
+		if (error && new_state->active && crtc->state->active)
 			return error;
 	}
 	return 0;

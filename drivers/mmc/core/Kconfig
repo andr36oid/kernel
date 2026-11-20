@@ -93,10 +93,16 @@ config MMC_CRYPTO
 config MMC_QUEUE_DEPTH
 	int "MMC Queue Depth number"
 	range 1 64
-	depends on ROCKCHIP_MINI_KERNEL
 	default 64
 	help
 	  Set a depth num for mmc queue, user can set it lower to decrease
 	  queue number to save memory, suggest set to NR_CPUS.
+
+	  Only used for hosts without command queueing (CQE): those queue
+	  one request at a time (mq->busy) with at most two in flight
+	  (mmc_blk_mq_issue_rw_rq waits for the previous one), so the tags
+	  above a handful are only a waiting room. Every tag holds a
+	  scatter list of max_segs entries (8 KiB on dw_mmc). With an I/O
+	  scheduler the default nr_requests is twice this value.
 
 	  If unsure, say 64 here.
