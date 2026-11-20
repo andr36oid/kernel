@@ -34,6 +34,8 @@
 };
 
 &sdio {
+	/delete-property/ andr36oid,second-card-slot;
+	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk>;
 	/delete-property/ supports-sd;
 	/delete-property/ cd-gpios;
 	/delete-property/ card-detect-delay;

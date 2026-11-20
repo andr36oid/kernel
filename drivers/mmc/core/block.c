@@ -292,7 +292,7 @@ out_put:
  *   system (andr36oid,read-only taken out, andr36oid installed on the eMMC):
  *   read-write, except the first ANDR36OID_LOADER_END sectors, where the
  *   partition table and the bootloader (idbloader, U-Boot, trust) are. A
- *   system on the eMMC never rewrites what starts it.
+ *   system on the eMMC can update U-Boot proper, keeping its first stage.
  *
  * Raw MMC commands from user space (ioctl, boot area write protection) are
  * always refused, since those could write anywhere. Only a root helper,
@@ -342,6 +342,13 @@ static bool mmc_blk_andr36oid_refused(struct mmc_blk_data *md,
 	    mmc_blk_andr36oid_ro(card))
 		return true;
 	if (andr36oid_unlocked)
+		return false;
+	/* Healthy Android updates may replace the redundant U-Boot copies.
+	 * First stage, partition table, trust and hardware boot areas stay blocked.
+	 */
+	if (req_op(req) == REQ_OP_WRITE && !md->part_type &&
+	    blk_rq_pos(req) >= 16384 && blk_rq_pos(req) < 24576 &&
+	    blk_rq_sectors(req) <= 24576 - blk_rq_pos(req))
 		return false;
 	return blk_rq_pos(req) < ANDR36OID_LOADER_END;
 }

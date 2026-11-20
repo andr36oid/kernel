@@ -210,6 +210,7 @@
 };
 
 &sdio {
+	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk &soysauce_tf2_cd_pullup>;
 	cd-gpios = <&gpio0 RK_PB2 GPIO_ACTIVE_LOW>;
 	no-1-8-v;
 	/delete-property/ sd-uhs-sdr12;
@@ -263,4 +264,12 @@
 
 &emmc {
 	andr36oid,builtin-emmc;
+};
+
+&pinctrl {
+	andr36oid-card-detect {
+		soysauce_tf2_cd_pullup: soysauce-tf2-cd-pullup {
+			rockchip,pins = <0 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
 };

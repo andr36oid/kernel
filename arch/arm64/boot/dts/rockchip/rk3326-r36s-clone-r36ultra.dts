@@ -105,6 +105,8 @@
 };
 
 &sdio {
+	/delete-property/ andr36oid,second-card-slot;
+	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk>;
 	/delete-property/ supports-sd;
 	/delete-property/ cd-gpios;
 	/delete-property/ card-detect-delay;
@@ -122,13 +124,12 @@
 };
 
 /*
- * The gpio2 PA2/PA1/PA0 RGB is NOT a plain status LED: on stock these are the
- * micro,gamepad red/green/blue-gpio, owned by the gamepad driver - i.e. the
- * lighting around the analog sticks. So instead of dumb on/off gpio-leds we
- * hand them to the joypad LED engine below, which software-PWMs them for
- * brightness, breathing, rainbow, stick-direction and battery effects. The
- * board's own power/charge status LED (GPIO0_C1, base gpio_leds) is left as
- * is. led_pins still muxes PA0-2 to GPIO; the engine claims them on probe.
+ * The gpio2 PA2/PA1/PA0 trio is the stock micro,gamepad red/green/blue-gpio,
+ * but on the R36 Ultra the stick rings are driven by the keros effect-LED IC
+ * below (keros::ambient); toggling PA0-2 lights nothing. So the joypad LED
+ * engine is NOT set up on this board: no led-*-gpios / led-default-* in the
+ * joypad node, which leaves the engine off (led_mode reads "unsupported") and
+ * stops its software PWM timer. led_pins keeps PA0-2 muxed as plain GPIO.
  */
 
 /*
@@ -140,20 +141,6 @@
  */
 &joypad {
 	rumble-gpios = <&gpio3 RK_PA6 GPIO_ACTIVE_HIGH>;
-
-	/*
-	 * Stick-ring RGB. One shared trio here; a board that wires the left
-	 * and right rings separately can add led-{red,green,blue}-right-gpios
-	 * and the engine drives them independently. Default: solid accent
-	 * orange; userspace overwrites the colour with the real system accent.
-	 */
-	led-red-gpios   = <&gpio2 RK_PA2 GPIO_ACTIVE_HIGH>;
-	led-green-gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_HIGH>;
-	led-blue-gpios  = <&gpio2 RK_PA0 GPIO_ACTIVE_HIGH>;
-	andr36oid,led-default-mode = "static";
-	andr36oid,led-default-color = <0xff7a00>;
-	andr36oid,led-default-brightness = <160>;
-	andr36oid,led-default-speed = <40>;
 };
 
 &led_pins {
@@ -179,9 +166,10 @@
  * 0 = off (enable dropped, chip unpowered, guaranteed dark), 1..9 = built-in
  * effects, 11 = chip init/off. It leaves the rings dark at probe.
  *
- * This is a different bank from the gpio2 PA0-2 joypad RGB above and is left
- * in place alongside it; the two are expected to be different physical LEDs.
- * Confirm on hardware which rings each path lights before removing either.
+ * This is what lights the stick rings on the Ultra (owner-verified
+ * 2026-11-19: keros preset 0 = rings dark while the joypad engine was still
+ * PWMing gpio2 PA0-2 for nothing). The joypad LED engine is therefore not
+ * set up on this board, see the note above the joypad node.
  */
 / {
 	keros_leds: keros-leds {

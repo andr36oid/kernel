@@ -290,6 +290,7 @@
 };
 
 &sdio {
+	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk &ee_tf2_cd_pullup>;
 	cd-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
 	vmmc-supply = <&vcc_lcd>;
 	vqmmc-supply = <&vcc_backlight>;
@@ -391,4 +392,12 @@
 
 &emmc {
 	andr36oid,builtin-emmc;
+};
+
+&pinctrl {
+	andr36oid-card-detect {
+		ee_tf2_cd_pullup: ee-tf2-cd-pullup {
+			rockchip,pins = <0 RK_PA2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
 };

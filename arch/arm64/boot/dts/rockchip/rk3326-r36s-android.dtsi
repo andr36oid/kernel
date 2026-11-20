@@ -1312,6 +1312,8 @@
 	cd-gpios = <&gpio3 RK_PB6 GPIO_ACTIVE_LOW>; /*[> CD GPIO <]*/
 	/* Settings can switch it off for the next start (dw_mmc_rockchip.second_slot) */
 	andr36oid,second-card-slot;
+	/* Keep an empty TF2 detect input high through suspend/resume. */
+	pinctrl-0 = <&sdio_bus4 &sdio_cmd &sdio_clk &tf2_cd_pullup>;
 	/*
 	 * The second slot's I/O rail (vccio_sd) is fixed at 1.8 V and its card
 	 * power (vcc_sd) can't be cycled because slot 1 shares it, so the UHS
@@ -1500,4 +1502,12 @@
 /* Idle until bootloader or userspace arms it; strict trials are cmdline-only. */
 &wdt {
 	status = "okay";
+};
+
+&pinctrl {
+	andr36oid-card-detect {
+		tf2_cd_pullup: tf2-cd-pullup {
+			rockchip,pins = <3 RK_PB6 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
 };

@@ -1477,7 +1477,14 @@ void _mmc_detect_change(struct mmc_host *host, unsigned long delay, bool cd_irq)
 	 * corresponding uevent. This is especially useful, when CD irq is used
 	 * as a system wakeup, but doesn't hurt in other cases.
 	 */
-	if (cd_irq && !(host->caps & MMC_CAP_NEEDS_POLL))
+	/* Removable TF2 has no card-detect wake role. Match the 4.19 policy:
+	 * a power/pin transition must not turn its CD IRQ into a new wakeup.
+	 * The detect work still runs, including insertion while awake.
+	 */
+	if (cd_irq && !(host->caps & MMC_CAP_NEEDS_POLL) &&
+	    (!of_property_read_bool(host->parent->of_node,
+				   "andr36oid,second-card-slot") ||
+	     device_can_wakeup(mmc_dev(host))))
 		__pm_wakeup_event(host->ws, 5000);
 
 	host->detect_change = 1;

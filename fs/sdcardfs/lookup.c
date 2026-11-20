@@ -276,8 +276,13 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
 	/* Use vfs_path_lookup to check if the dentry exists or not */
 	err = vfs_path_lookup(lower_dir_dentry, lower_dir_mnt, name->name, 0,
 				&lower_path);
-	/* check for other cases */
-	if (err == -ENOENT) {
+	/* Both in-tree exFAT implementations compare names without case for all
+	 * supported mount modes. A lower miss needs no second directory scan.
+	 * Keep the legacy scan for FAT (including strict-name mounts), ext4,
+	 * and every other lower filesystem; magic alone is not enough there.
+	 */
+	if (err == -ENOENT &&
+	    strcmp(lower_dir_dentry->d_sb->s_type->name, "exfat")) {
 		struct file *file;
 		const struct cred *cred = current_cred();
 

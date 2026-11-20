@@ -48,6 +48,8 @@
 #include <linux/math64.h>
 #include <linux/hrtimer.h>
 #include <linux/power_supply.h>
+#include <linux/workqueue.h>
+#include "odroidgo3-joypad-centre.h"
 
 /*----------------------------------------------------------------------------*/
 #define DRV_NAME "odroidgo3_joypad"
@@ -207,6 +209,9 @@ struct joypad {
 	int bt_adc_deadzone;
 
 	struct mutex lock;
+	struct delayed_work centre_work;
+	bool centre_ready, centre_dead;
+	unsigned long centre_due;
 
 	/* amux debug channel */
 	int debug_ch;
@@ -457,6 +462,73 @@ static int joypad_adc_read(struct analog_mux *amux, struct bt_adc *adc)
 	return value;
 }
 
+
+/* Automatic centres must not be based on one unsettled mux/rail conversion. */
+struct joypad_centre_context { struct analog_mux *amux; struct bt_adc *adc; };
+static int joypad_centre_read(void *context)
+{
+        struct joypad_centre_context *sample = context;
+        return joypad_adc_read(sample->amux, sample->adc);
+}
+static void joypad_centre_pause(void *context)
+{
+        (void)context;
+        usleep_range(1000, 1200);
+}
+/* Caller holds ->lock, including against an explicit stick_cal write. */
+static void joypad_capture_centres_locked(struct joypad *joypad, const char *why)
+{
+        int nbtn;
+        if (joypad->no_sticks || joypad->cal.valid)
+                return;
+        for (nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
+                struct bt_adc *adc = &joypad->adcs[nbtn];
+                struct joypad_centre_context context = { joypad->amux, adc };
+                struct a36_centre_sample sample;
+                int old = adc->cal;
+                if (a36_sample_centre(&context, joypad_centre_read,
+                                      joypad_centre_pause, &sample)) {
+                        /* Keep a valid earlier capture. With none, use electrical
+                         * mid-scale rather than turning an IIO error into full
+                         * stick travel. This is bounded, with a visible warning. */
+                        if (!adc->cal)
+                                adc->cal = adc->max;
+                        dev_warn(joypad->dev,
+                                 "centre %s mux%d: read failed, first=%d keep=%d\n",
+                                 why, adc->amux_ch, sample.first, adc->cal);
+                        continue;
+                }
+                adc->cal = sample.median;
+                adc->value = sample.median;
+                dev_info(joypad->dev,
+                         "centre %s mux%d: first=%d median=%d span=%d old=%d\n",
+                         why, adc->amux_ch, sample.first, sample.median,
+                         sample.span, old);
+        }
+}
+static bool joypad_centres_ready(struct joypad *joypad)
+{
+        return joypad->no_sticks || READ_ONCE(joypad->cal.valid) ||
+                READ_ONCE(joypad->centre_ready);
+}
+static void joypad_delayed_centre(struct work_struct *work)
+{
+        struct joypad *joypad = container_of(to_delayed_work(work),
+                                            struct joypad, centre_work);
+        mutex_lock(&joypad->lock);
+        if (!joypad->centre_dead) {
+                joypad_capture_centres_locked(joypad, "delayed");
+                /* No uncalibrated input has been reported before this commit. */
+                WRITE_ONCE(joypad->centre_ready, true);
+        }
+        mutex_unlock(&joypad->lock);
+}
+static void joypad_cancel_centre(void *data)
+{
+        struct joypad *joypad = data;
+        cancel_delayed_work_sync(&joypad->centre_work);
+}
+
 /*----------------------------------------------------------------------------*/
 /*----------------------------------------------------------------------------*/
 /*
@@ -597,20 +669,8 @@ static ssize_t joypad_store_adc_cal(struct device *dev,
 	calibration = simple_strtoul(buf, NULL, 10);
 
 	if (calibration) {
-		int nbtn;
-
 		mutex_lock(&joypad->lock);
-		for (nbtn = 0; nbtn < joypad->amux_count; nbtn++) {
-			struct bt_adc *adc = &joypad->adcs[nbtn];
-
-			adc->value = joypad_adc_read(joypad->amux, adc);
-			if (!adc->value) {
-				dev_err(joypad->dev, "%s : saradc channels[%d]!\n",
-					__func__, nbtn);
-				continue;
-			}
-			adc->cal = adc->value;
-		}
+		joypad_capture_centres_locked(joypad, "manual");
 		mutex_unlock(&joypad->lock);
 	}
 	return count;
@@ -1821,6 +1881,10 @@ static void joypad_adc_check(struct input_polled_dev *poll_dev)
 
 	mutex_lock(&joypad->lock);
 	cal = joypad->cal;
+	if (!cal.valid && !joypad->no_sticks && !joypad->centre_ready) {
+		mutex_unlock(&joypad->lock);
+		return;
+	}
 	mutex_unlock(&joypad->lock);
 
 	/* the floating ADC inputs would only report ghost stick moves */
@@ -1889,7 +1953,7 @@ static void joypad_poll(struct input_polled_dev *poll_dev)
 {
 	struct joypad *joypad = poll_dev->private;
 
-	if (joypad->enable) {
+	if (joypad->enable && joypad_centres_ready(joypad)) {
 		/* buttons first: the four stick conversions take a while */
 		joypad_gpio_check(poll_dev);
 		joypad_adc_check(poll_dev);
@@ -1986,22 +2050,13 @@ static void joypad_open(struct input_polled_dev *poll_dev)
 		struct bt_gpio *gpio = &joypad->gpios[nbtn];
 		gpio->old_value = gpio->active_level ? 0 : 1;
 	}
-	for (nbtn = 0; !joypad->no_sticks && nbtn < joypad->amux_count; nbtn++) {
-		struct bt_adc *adc = &joypad->adcs[nbtn];
-
-		adc->value = joypad_adc_read(joypad->amux, adc);
-		if (!adc->value) {
-			dev_err(joypad->dev, "%s : saradc channels[%d]!\n",
-				__func__, nbtn);
-			continue;
-		}
-		adc->cal = adc->value;
-		dev_info(joypad->dev, "%s : adc[%d] adc->cal = %d\n",
-			__func__, nbtn, adc->cal);
+	mutex_lock(&joypad->lock);
+	joypad_capture_centres_locked(joypad, "open");
+	mutex_unlock(&joypad->lock);
+	if (joypad_centres_ready(joypad)) {
+		joypad_adc_check(poll_dev);
+		joypad_gpio_check(poll_dev);
 	}
-	/* buttons status sync */
-	joypad_adc_check(poll_dev);
-	joypad_gpio_check(poll_dev);
 
 	/* button report enable */
 	mutex_lock(&joypad->lock);
@@ -2895,6 +2950,7 @@ static int __maybe_unused joypad_suspend(struct device *dev)
 	struct platform_device *pdev  = to_platform_device(dev);
 	struct joypad *joypad = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&joypad->centre_work);
 	cancel_work_sync(&joypad->play_work);
 	if (joypad->level)
 		pwm_vibrator_stop(joypad);
@@ -2917,6 +2973,9 @@ static int __maybe_unused joypad_resume(struct device *dev)
 {
 	struct platform_device *pdev  = to_platform_device(dev);
 	struct joypad *joypad = platform_get_drvdata(pdev);
+
+	if (!joypad->no_sticks && !READ_ONCE(joypad->centre_ready))
+		schedule_delayed_work(&joypad->centre_work, 0);
 
 	if (joypad->level)
 		pwm_vibrator_start(joypad);
@@ -2955,6 +3014,13 @@ static int joypad_probe(struct platform_device *pdev)
 		return error;
 
 	mutex_init(&joypad->lock);
+	joypad->dev = dev;
+	INIT_DELAYED_WORK(&joypad->centre_work, joypad_delayed_centre);
+	joypad->centre_ready = joypad->no_sticks;
+	joypad->centre_due = jiffies + msecs_to_jiffies(1000);
+	error = devm_add_action_or_reset(dev, joypad_cancel_centre, joypad);
+	if (error)
+		return error;
 	joypad->cal.deadzone = STICK_DEADZONE_DEFAULT;
 	joypad->stick_sens[0] = STICK_SENS_DEFAULT;
 	joypad->stick_sens[1] = STICK_SENS_DEFAULT;
@@ -2989,6 +3055,11 @@ static int joypad_probe(struct platform_device *pdev)
 		return error;
 	}
 
+	if (!joypad->no_sticks) {
+		unsigned long delay = time_before(jiffies, joypad->centre_due) ?
+			joypad->centre_due - jiffies : 0;
+		schedule_delayed_work(&joypad->centre_work, delay);
+	}
 	dev_info(dev, "%s : probe success\n", __func__);
 	return 0;
 }
@@ -2997,6 +3068,11 @@ static int joypad_probe(struct platform_device *pdev)
 static int joypad_remove(struct platform_device *pdev)
 {
 	struct joypad *joypad = platform_get_drvdata(pdev);
+
+	mutex_lock(&joypad->lock);
+	joypad->centre_dead = true;
+	mutex_unlock(&joypad->lock);
+	cancel_delayed_work_sync(&joypad->centre_work);
 
 	/* stop the LED carrier and blank the rings before we go */
 	if (joypad && joypad->led_have) {
