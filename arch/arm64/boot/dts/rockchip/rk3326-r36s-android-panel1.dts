@@ -104,3 +104,8 @@
 &status_led {
 	status = "okay";
 };
+
+/* V2 panel state/link contract checked against every packed loader alias. */
+&{/dsi@ff450000/panel@0} {
+	andr36oid,adopt-loader-panel;
+};

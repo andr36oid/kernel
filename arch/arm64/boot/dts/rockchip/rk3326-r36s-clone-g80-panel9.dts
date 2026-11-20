@@ -15,3 +15,8 @@
 / {
 	model = "R36S clone G80, Panel 9 (experimental)";
 };
+
+/* V2 panel state/link contract checked against every packed loader alias. */
+&{/dsi@ff450000/panel@0} {
+	andr36oid,adopt-loader-panel;
+};

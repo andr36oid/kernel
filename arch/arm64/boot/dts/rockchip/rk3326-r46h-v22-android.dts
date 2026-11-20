@@ -288,3 +288,8 @@
 	de-active = <0>;
 	pixelclk-active = <0>;
 };
+
+/* This inherited board has no checked packed loader counterpart. */
+&{/dsi@ff450000/panel@0} {
+	/delete-property/ andr36oid,adopt-loader-panel;
+};

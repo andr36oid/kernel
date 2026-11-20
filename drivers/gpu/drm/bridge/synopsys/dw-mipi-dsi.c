@@ -1410,6 +1410,8 @@ int dw_mipi_dsi_adopt_loader(struct drm_bridge *bridge,const struct drm_display_
  if(!dw_mipi_dsi_needs_checked_prepare(bridge) || rockchip_logo_match_mode(mode))
   return -EINVAL;
  dsi=bridge_to_dsi(bridge);ops=dsi->plat_data->phy_ops;
+ if(!dsi->panel || !of_property_read_bool(dsi->panel->dev->of_node,
+    "andr36oid,adopt-loader-panel"))return -EOPNOTSUPP;
  if(dsi->slave || dsi->next_bridge || !dsi->panel || !ops->adopt_loader || !ops->hold_loader ||
     dsi->core_active || dsi->checked_latched_error)return -EOPNOTSUPP;
  ret=pm_runtime_get_sync(dsi->dev);

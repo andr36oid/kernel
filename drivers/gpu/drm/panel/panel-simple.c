@@ -491,6 +491,8 @@ static int panel_simple_regulator_disable(struct panel_simple *p)
 int panel_simple_verify_loader(struct drm_panel *panel)
 {
  struct panel_simple *p=to_panel_simple(panel);u8 mode=0;unsigned long flags;int ret;
+ if(!of_property_read_bool(panel->dev->of_node,"andr36oid,adopt-loader-panel"))
+  return -EOPNOTSUPP;
  if(!p->dsi || p->power_invert || p->init_error || p->prepared || p->enabled)
   return -EOPNOTSUPP;
  if(regulator_is_enabled(p->supply)<=0)return -EIO;
@@ -512,6 +514,9 @@ int panel_simple_loader_protect(struct drm_panel *panel)
 	struct panel_simple *p = to_panel_simple(panel);
 	int err;
 
+	if (!of_property_read_bool(panel->dev->of_node,
+				   "andr36oid,adopt-loader-panel"))
+		return -EOPNOTSUPP;
 	if (p->init_error)
 		return p->init_error;
 	/* Do not acquire a second supply reference for an existing state. */
