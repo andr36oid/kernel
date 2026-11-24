@@ -1265,6 +1265,12 @@
 	status = "okay";
 	rockchip,sleep-debug-en = <1>;
 	/*
+	 * The cluster and USB wake routes can return from deep sleep at once.
+	 * RK817 power-key, RTC and charger events use its GPIO0 interrupt.
+	 * Keep that explicit wake route for the handheld board family.
+	 */
+	rockchip,wakeup-config = <RKPM_GPIO_WKUP_EN>;
+	/*
 	 * The stock flags without PMU_PMUALIVE_32K and PMU_DIS_OSC: the 24 MHz
 	 * crystal keeps running in sleep. With them, our BL31 (v1.14, 2018)
 	 * times the wake-up with a ring oscillator it measures only once, when
