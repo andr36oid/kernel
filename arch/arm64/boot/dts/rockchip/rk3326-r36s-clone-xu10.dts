@@ -1,0 +1,257 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * EXPERIMENTAL - not tested on hardware by andr36oid.
+ *
+ * MagicX XU10 (clone issue tracker #14). Close to the genuine R36S in the
+ * power chip, card slots, headphone detect and backlight, but:
+ *  - the main 3.3 V rails are 3.0 V, the screen logic rail 3.0 V and the
+ *    backlight rail 2.8 V;
+ *  - the screen (the Panel 0 start sequence) has an enable line, GPIO0_B5;
+ *  - every button except the d-pad is on another pin, the volume keys are
+ *    where the R36S has its rumble motor and its blue LED;
+ *  - each stick has its own ADC input and a two-way switch between its axes.
+ *
+ * Values from the dArkOS port (arkos4clone, consoles/xu10, SHA256
+ * b045d06d8e27442ee8172c4758de8665aab41eea963afdddaaba7e459b653c2c), stick
+ * wiring cross checked with the xu10-joypad driver of AmberELEC and the
+ * ROCKNIX device tree.
+ */
+
+/dts-v1/;
+#include "rk3326-r36s-android.dtsi"
+
+/ {
+	model = "MagicX XU10 (experimental)";
+
+	/* USB host power switch, always on in the stock tree */
+	vbus_host: vbus-host {
+		compatible = "regulator-fixed";
+		regulator-name = "vbus_host";
+		gpio = <&gpio0 RK_PA2 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+		vin-supply = <&dcdc_boost>;
+	};
+};
+
+&gpio_keys {
+	button@0 {
+		gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_LOW>;	/* volume up */
+	};
+	button@1 {
+		gpios = <&gpio0 RK_PC1 GPIO_ACTIVE_LOW>;	/* volume down */
+	};
+};
+
+/* GPIO0_B7 is the volume up key here, not a rumble motor */
+&pwm0 {
+	status = "disabled";
+};
+
+&joypad {
+	/* pwms stays for the older joypad driver of the resizer and recovery */
+	andr36oid,no-rumble;
+	/delete-property/ pinctrl-1;	/* the PWM0 pin, GPIO0_B7 */
+
+	/*
+	 * Left stick on ADC input 1, right stick on input 2. The first name
+	 * stays "amux_adc" so a kernel without andr36oid,split-adc still finds
+	 * its channel and the buttons work there.
+	 */
+	andr36oid,split-adc;
+	io-channel-names = "amux_adc", "joy_right";
+	io-channels = <&saradc 1>, <&saradc 2>;
+	amux-a-gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_LOW>;
+	amux-b-gpios = <&gpio2 RK_PB5 GPIO_ACTIVE_LOW>;
+	amux-en-gpios = <&gpio1 RK_PB0 GPIO_ACTIVE_LOW>;	/* from ROCKNIX */
+	invert-absx;
+	invert-absy;
+
+	/* d-pad (sw1 to sw4) is on the R36S pins */
+	sw5 { gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_LOW>; };	/* A */
+	sw6 { gpios = <&gpio2 RK_PA3 GPIO_ACTIVE_LOW>; };	/* B */
+	sw7 { gpios = <&gpio2 RK_PA2 GPIO_ACTIVE_LOW>; };	/* Y */
+	sw8 { gpios = <&gpio2 RK_PA0 GPIO_ACTIVE_LOW>; };	/* X */
+	sw11 { gpios = <&gpio2 RK_PB1 GPIO_ACTIVE_LOW>; };	/* L3 */
+	sw12 { gpios = <&gpio2 RK_PB2 GPIO_ACTIVE_LOW>; };	/* R3 */
+	sw13 { gpios = <&gpio2 RK_PA4 GPIO_ACTIVE_LOW>; };	/* FN */
+	sw15 { gpios = <&gpio2 RK_PA6 GPIO_ACTIVE_LOW>; };	/* L1 */
+	sw16 { gpios = <&gpio2 RK_PA7 GPIO_ACTIVE_LOW>; };	/* R1 */
+	sw19 { gpios = <&gpio2 RK_PB0 GPIO_ACTIVE_LOW>; };	/* select */
+	sw20 { gpios = <&gpio3 RK_PB2 GPIO_ACTIVE_LOW>; };	/* R2 */
+	sw21 { gpios = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW>; };	/* L2 */
+	sw22 { gpios = <&gpio2 RK_PA5 GPIO_ACTIVE_LOW>; };	/* start */
+};
+
+/*
+ * GPIO0_C1 (the R36S heartbeat LED) is the volume down key here and nothing
+ * is known about GPIO1_B2 (the R36S vibration LED).
+ */
+&leds {
+	status = "disabled";
+};
+
+/* One LED on GPIO0_B4: blue with the pin low, white with it high */
+&status_led {
+	gpios = <&gpio0 RK_PB4 GPIO_ACTIVE_HIGH>;
+	color-names = "blue", "white";
+	color-states = <0>, <1>;
+	andr36oid,battery = "11 blue 0 white";
+	andr36oid,sleep = "blue";
+	andr36oid,charging = "white";
+	andr36oid,full = "blue";
+	status = "okay";
+};
+
+&rk817 {
+	charger {
+		/* GPIO2_B5 switches the right stick here */
+		/delete-property/ bat_low_gpio;
+	};
+
+	battery {
+		/* stock values: 2800 mAh cell */
+		ocv_table = <3300 3340 3380 3420 3460 3500 3540
+			3570 3610 3650 3690 3720 3750 3790
+			3830 3870 3910 3940 3967 4001 4046>;
+		design_capacity = <2800>;
+		design_qmax = <3000>;
+		bat_res = <100>;
+		power_off_thresd = <3300>;
+		zero_algorithm_vol = <3850>;
+		max_soc_offset = <60>;
+	};
+};
+
+/* 3.0 V where the R36S has 3.3 V */
+&vcc_3v3 {
+	regulator-name = "vcc_3v0";
+	regulator-min-microvolt = <3000000>;
+	regulator-max-microvolt = <3000000>;
+
+	regulator-state-mem {
+		regulator-suspend-microvolt = <3000000>;
+	};
+};
+
+&vcc3v3_pmu {
+	regulator-name = "vcc3v0_pmu";
+	regulator-min-microvolt = <3000000>;
+	regulator-max-microvolt = <3000000>;
+
+	regulator-state-mem {
+		regulator-suspend-microvolt = <3000000>;
+	};
+};
+
+/*
+ * LDO7 feeds the backlight circuit at 2.8 V. The stock tree switches it with
+ * the screen; our panel driver has no backlight supply, so it stays on.
+ */
+&vcc_backlight {
+	regulator-always-on;
+	regulator-boot-on;
+	regulator-min-microvolt = <2800000>;
+	regulator-max-microvolt = <2800000>;
+
+	regulator-state-mem {
+		regulator-suspend-microvolt = <2800000>;
+	};
+};
+
+/* LDO8 feeds the screen at 3.0 V and is always on in the stock tree */
+&vcc_lcd {
+	regulator-always-on;
+	regulator-boot-on;
+	regulator-min-microvolt = <3000000>;
+	regulator-max-microvolt = <3000000>;
+
+	regulator-state-mem {
+		regulator-suspend-microvolt = <3000000>;
+	};
+};
+
+&dsi {
+	panel@0 {
+		enable-gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_HIGH>;
+
+		/* the Panel 0 sequence, byte for byte the stock one */
+		panel-init-sequence = [
+			39 00 04 b9 f1 12 83
+			39 00 06 b1 00 00 00 da 80
+			39 00 04 b2 00 13 70
+			39 00 0b b3 10 10 28 28 03 ff 00 00 00 00
+			15 00 02 b4 80
+			15 00 03 b5 0a 0a
+			15 00 03 b6 7f 7f
+			39 00 05 b8 26 62 f0 63
+			39 00 1c ba 33 81 05 f9 0e 0e 20 00 00 00 00 00 00 00 44 25 00 90 0a 00 00 01 4f 01 00 00 37
+			15 00 02 bc 47
+			39 00 04 bf 02 11 00
+			39 00 0a c0 73 73 50 50 00 00 12 50 00
+			39 00 0d c1 53 c0 32 32 77 e1 dd dd 77 77 33 33
+			39 00 07 c6 82 00 bf ff 00 ff
+			39 00 07 c7 b8 00 0a 00 00 00
+			39 00 05 c8 10 40 1e 02
+			15 00 02 cc 0b
+			39 00 23 e0 00 07 0d 37 35 3f 41 44 06 0c 0d 0f 11 10 12 14 1a 00 07 0d 37 35 3f 41 44 06 0c 0d 0f 11 10 12 14 1a
+			39 00 0f e3 07 07 0b 0b 0b 0b 00 00 00 00 ff 00 c0 10
+			39 00 40 e9 c8 10 02 00 00 b0 b1 11 31 23 28 80 b0 b1 27 08 00 04 02 00 00 00 00 04 02 00 00 00 88 88 ba 60 24 08 88 88 88 88 88 88 88 ba 71 35 18 88 88 88 88 88 00 00 00 01 00 00 00 00 00 00 00 00 00
+			39 00 3e ea 97 0a 82 02 03 07 00 00 00 00 00 00 81 88 ba 17 53 88 88 88 88 88 88 80 88 ba 06 42 88 88 88 88 88 88 23 00 00 02 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+			39 00 04 ef ff ff 01
+			05 c8 01 11
+			05 32 01 29
+		];
+
+		display-timings {
+			/* one mode only: the R36S alternates do not fit this panel */
+			/delete-node/ timing1;
+			/delete-node/ timing2;
+		};
+	};
+};
+
+/* 26.4 MHz, 880 x 500 total: 60.0 Hz */
+&timing0 {
+	clock-frequency = <26400000>;
+	hactive = <640>;
+	vactive = <480>;
+	hfront-porch = <119>;
+	hsync-len = <2>;
+	hback-porch = <119>;
+	vfront-porch = <13>;
+	vsync-len = <2>;
+	vback-porch = <5>;
+	hsync-active = <0>;
+	vsync-active = <0>;
+	de-active = <0>;
+	pixelclk-active = <0>;
+};
+
+/* Off in the stock tree; nothing is known about its pins on this board */
+&uart1 {
+	status = "disabled";
+};
+
+&btn_pins {
+	rockchip,pins =
+		<0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>,
+		<0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_up>,
+		<1 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>,
+		<1 RK_PB5 RK_FUNC_GPIO &pcfg_pull_up>,
+		<1 RK_PB6 RK_FUNC_GPIO &pcfg_pull_up>,
+		<1 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA0 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA1 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA2 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA3 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA4 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA6 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PB0 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PB1 RK_FUNC_GPIO &pcfg_pull_up>,
+		<2 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>,
+		<3 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>,
+		<3 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>;
+};

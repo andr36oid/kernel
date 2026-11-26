@@ -118,6 +118,13 @@ struct bt_adc {
 struct analog_mux {
 	/* IIO ADC Channel : amux connect channel */
 	struct iio_channel *iio_ch;
+	/*
+	 * Boards with one ADC input per stick (andr36oid,split-adc, MagicX
+	 * XU10): the right stick's input. Each stick has a two-way switch
+	 * between its axes and both select lines move together.
+	 */
+	struct iio_channel *iio_ch_r;
+	bool split;
 	/* analog mux select(a,b) gpio */
 	int sel_a_gpio, sel_b_gpio;
 	/* analog mux enable gpio */
@@ -419,6 +426,18 @@ static int joypad_amux_select(struct analog_mux *amux, int channel)
 	/* select mux channel */
 	gpio_set_value(amux->en_gpio, 0);
 
+	if (amux->split) {
+		/* 0 RY, 1 RX on the right input; 2 Y, 3 X on the left one */
+		if (channel < 0 || channel > 3) {
+			gpio_set_value(amux->en_gpio, 1);
+			return -1;
+		}
+		gpio_set_value(amux->sel_a_gpio, channel & 1);
+		gpio_set_value(amux->sel_b_gpio, channel & 1);
+		usleep_range(1, 2);
+		return 0;
+	}
+
 	switch(channel) {
 		case 0:	/* EVENT (ABS_RY) */
 			gpio_set_value(amux->sel_a_gpio, 0);
@@ -447,6 +466,12 @@ static int joypad_amux_select(struct analog_mux *amux, int channel)
 }
 
 /*----------------------------------------------------------------------------*/
+static struct iio_channel *joypad_amux_input(struct analog_mux *amux, int channel)
+{
+	return (amux->split && channel < 2) ? amux->iio_ch_r : amux->iio_ch;
+}
+
+/*----------------------------------------------------------------------------*/
 static int joypad_adc_read(struct analog_mux *amux, struct bt_adc *adc)
 {
 	int value;
@@ -454,7 +479,7 @@ static int joypad_adc_read(struct analog_mux *amux, struct bt_adc *adc)
 	if (joypad_amux_select(amux, adc->amux_ch))
 		return 0;
 
-	if (iio_read_channel_processed(amux->iio_ch, &value))
+	if (iio_read_channel_processed(joypad_amux_input(amux, adc->amux_ch), &value))
 		return 0;
 
 	value *= adc->scale;
@@ -752,7 +777,7 @@ static ssize_t joypad_show_amux_debug(struct device *dev,
 	if (joypad_amux_select(amux, joypad->debug_ch))
 		goto err_out;
 
-	if (iio_read_channel_processed(amux->iio_ch, &value))
+	if (iio_read_channel_processed(joypad_amux_input(amux, joypad->debug_ch), &value))
 		goto err_out;
 
 	pos = sprintf(buf, "amux ch[%d], adc scale = %d, adc value = %d\n",
@@ -2121,6 +2146,26 @@ static int joypad_amux_setup(struct device *dev, struct joypad *joypad)
 	if (type != IIO_VOLTAGE) {
 		dev_err(dev, "Incompatible channel type %d\n", type);
 		return -EINVAL;
+	}
+
+	/*
+	 * "amux_adc" stays the left stick's input, so a kernel without this
+	 * still finds its channel and the buttons work there.
+	 */
+	amux->split = of_property_read_bool(dev->of_node, "andr36oid,split-adc");
+	if (amux->split) {
+		amux->iio_ch_r = devm_iio_channel_get(dev, "joy_right");
+		if (IS_ERR(amux->iio_ch_r)) {
+			dev_err(dev, "right stick iio channel get error\n");
+			return -EINVAL;
+		}
+		if (!amux->iio_ch_r->indio_dev)
+			return -ENXIO;
+		if (iio_get_channel_type(amux->iio_ch_r, &type) || type != IIO_VOLTAGE) {
+			dev_err(dev, "Incompatible right stick channel\n");
+			return -EINVAL;
+		}
+		dev_info(dev, "one ADC input per stick\n");
 	}
 
 	amux->sel_a_gpio = of_get_named_gpio_flags(dev->of_node,

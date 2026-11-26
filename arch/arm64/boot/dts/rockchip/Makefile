@@ -381,3 +381,4 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r50s-v30-b-android.dtb
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-soysauce-panel6-pmicfix.dtb
 
 dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-soysauce-v06-2604.dtb
+dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3326-r36s-clone-xu10.dtb
